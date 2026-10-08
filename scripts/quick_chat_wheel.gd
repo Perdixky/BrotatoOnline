@@ -83,23 +83,13 @@ func _input(event: InputEvent) -> void:
 
 	if event is InputEventJoypadButton:
 		if _is_lt_button_index(event.button_index):
-			_set_gamepad_lt_down(event.device, event.pressed)
-			if event.pressed:
-				_try_open_gamepad_wheel(event.device)
-			else:
-				_finish_gamepad_wheel(event.device)
+			_sync_gamepad_lt_state(event.device, _is_gamepad_lt_pressed(event.device))
 			get_tree().set_input_as_handled()
 			return
 
 	if event is InputEventJoypadMotion:
 		if _is_lt_axis_index(event.axis):
-			var lt_down = _axis_value_is_pressed(event.axis_value)
-			var was_down = bool(_gamepad_lt_down.get(event.device, false))
-			_set_gamepad_lt_down(event.device, lt_down)
-			if lt_down and not was_down:
-				_try_open_gamepad_wheel(event.device)
-			elif not lt_down and was_down:
-				_finish_gamepad_wheel(event.device)
+			_sync_gamepad_lt_state(event.device, _is_gamepad_lt_pressed(event.device))
 			if _wheel_active and _gamepad_active and event.device == _gamepad_device:
 				get_tree().set_input_as_handled()
 			return
@@ -121,6 +111,9 @@ func _input(event: InputEvent) -> void:
 
 func _process(_delta: float) -> void:
 	_update_ctrl_mouse_visibility()
+	# Menu GUI (especially the host shop) may consume LT events before _input
+	# receives them. Poll the physical state so press/release still work there.
+	_poll_gamepad_lt_state()
 
 	var mouse_left_down = Input.is_mouse_button_pressed(BUTTON_LEFT)
 	if not _gamepad_active:
@@ -678,8 +671,37 @@ func _finish_gamepad_wheel(device: int) -> void:
 	_close_wheel()
 
 
-func _set_gamepad_lt_down(device: int, down: bool) -> void:
+func _poll_gamepad_lt_state() -> void:
+	var connected = {}
+	for device_value in Input.get_connected_joypads():
+		var device = int(device_value)
+		connected[device] = true
+		_sync_gamepad_lt_state(device, _is_gamepad_lt_pressed(device))
+	for device in _gamepad_lt_down.keys():
+		if not connected.has(device):
+			_gamepad_lt_down.erase(device)
+			if _wheel_active and _gamepad_active and _gamepad_device == device:
+				# Unplugging a controller must not send the currently selected chat.
+				_close_wheel()
+
+
+func _is_gamepad_lt_pressed(device: int) -> bool:
+	for button in GAMEPAD_LT_BUTTON_CANDIDATES:
+		if Input.is_joy_button_pressed(device, int(button)):
+			return true
+	for axis in GAMEPAD_LT_AXIS_CANDIDATES:
+		if _axis_value_is_pressed(Input.get_joy_axis(device, int(axis))):
+			return true
+	return false
+
+
+func _sync_gamepad_lt_state(device: int, down: bool) -> void:
+	var was_down = bool(_gamepad_lt_down.get(device, false))
 	_gamepad_lt_down[device] = down
+	if down and not was_down:
+		_try_open_gamepad_wheel(device)
+	elif not down and was_down:
+		_finish_gamepad_wheel(device)
 
 
 func _is_lt_button_index(button_index: int) -> bool:
