@@ -1191,6 +1191,12 @@ func _get_or_create_host_entity(net_id: String, state: Dictionary) -> Node:
 	_host_entities[net_id] = node
 	_host_entity_category[net_id] = category
 	_host_entity_scene_path[net_id] = scene_path
+	# died is not equivalent to despawn (e.g. Scapegoat can revive in-place).
+	# Also handles vanilla pooling, which uses remove_child() rather than queue_free().
+	# Pool nodes may be reused, so replace the previous online-layer binding.
+	if node.is_connected("tree_exited", self, "_on_host_entity_tree_exited"):
+		node.disconnect("tree_exited", self, "_on_host_entity_tree_exited")
+	node.connect("tree_exited", self, "_on_host_entity_tree_exited", [node, net_id])
 
 	if _is_local_combat_category(category) and not _has_meta_true(node, "brotato_online_display_only_fallback"):
 		_configure_local_combat_entity(node, net_id, category, state)
@@ -2050,19 +2056,20 @@ func _on_host_local_entity_died(entity, _die_args, net_id: String, category: Str
 				category = str(_host_entity_category.get(net_id, category))
 			else:
 				return
+	# A reused pooled node may have an old death-signal binding. Only the currently
+	# tracked instance is allowed to report a kill for this network id.
+	if not _host_entities.has(net_id) or _host_entities[net_id] != entity:
+		return
 
 	# Host-confirmed deaths and vanilla room cleanup must never be reflected back as
 	# client kill claims. Both paths emit died synchronously from Entity.die().
 	if _is_valid_node(entity) and entity.has_meta("brotato_online_remote_death_applying") and bool(entity.get_meta("brotato_online_remote_death_applying")):
 		_pending_remote_deaths.erase(net_id)
-		_cleanup_host_entity_tracking(net_id)
 		return
 	if _die_args != null and bool(_die_args.cleaning_up):
 		_pending_remote_deaths.erase(net_id)
-		_cleanup_host_entity_tracking(net_id)
 		return
 	if _pending_remote_deaths.has(net_id):
-		_cleanup_host_entity_tracking(net_id)
 		return
 
 	if not ENABLE_DEATH_REPORTS:
@@ -2071,15 +2078,12 @@ func _on_host_local_entity_died(entity, _die_args, net_id: String, category: Str
 			# local proxy first, do not let the next compact Host snapshot recreate this
 			# net_id as the generic baby/boss fallback while the reliable claim is in flight.
 			_locally_killed_until[net_id] = OS.get_ticks_msec() + LOCAL_KILL_IGNORE_MSEC
-			_cleanup_host_entity_tracking(net_id)
 			_send_entity_kill_claim(net_id, category, entity)
 			_flush_boss_damage_reports(true)
 			return
-		_cleanup_host_entity_tracking(net_id)
 		return
 
 	_locally_killed_until[net_id] = OS.get_ticks_msec() + LOCAL_KILL_IGNORE_MSEC
-	_cleanup_host_entity_tracking(net_id)
 	_send_entity_kill_claim(net_id, category, entity)
 
 
@@ -2111,6 +2115,8 @@ func _send_entity_kill_claim(net_id: String, category: String, entity: Node = nu
 
 func _on_host_local_boss_took_damage(_unit, value: int, _knockback_direction: Vector2, _is_crit: bool, is_dodge: bool, is_protected: bool, _armor_did_something: bool, _args, _hit_type: int, _is_one_shot: bool, net_id: String) -> void:
 	if _is_game_host() or is_dodge or is_protected or int(value) <= 0 or net_id == "":
+		return
+	if not _host_entities.has(net_id) or _host_entities[net_id] != _unit:
 		return
 	# Do not revive broad client damage reports here. Entity death claims already cover
 	# boss/elite local deaths; this damage path remains a fast Vorpal one-shot fallback.
@@ -3460,7 +3466,8 @@ func _apply_pending_remote_death(id: String) -> void:
 		elif not already_dead and not node.is_queued_for_deletion():
 			# Non-Entity/display-only fallback nodes have no vanilla death lifecycle.
 			node.queue_free()
-	_cleanup_host_entity_tracking(id)
+	# Keep the mapping through the death animation. The tree_exited callback clears
+	# it when Entity.free_entity() returns the node to the pool (or queue_free runs).
 	_pending_remote_deaths.erase(id)
 	_locally_killed_until.erase(id)
 	_sent_kill_claim_ids.erase(id)
@@ -3482,10 +3489,33 @@ func _remove_host_entity(id: String, free_node: bool) -> void:
 	if _host_entities.has(id):
 		var node = _host_entities[id]
 		_unregister_from_spawner_arrays(node)
+		# Authoritative removal/scene teardown is allowed to clear tracking early.
+		# Drop this binding when the node stays alive to finish a death animation.
+		if node != null and is_instance_valid(node) and node.is_connected("tree_exited", self, "_on_host_entity_tree_exited"):
+			node.disconnect("tree_exited", self, "_on_host_entity_tree_exited")
 		if free_node and _is_valid_node(node):
 			node.queue_free()
 	_cleanup_host_entity_tracking(id)
 	_pending_remote_deaths.erase(id)
+
+
+func _on_host_entity_tree_exited(node: Node, net_id: String) -> void:
+	# A pooled node can later be bound to a different net_id. Never allow an old
+	# callback to clear a newer binding for the same id or another entity.
+	if not _host_entities.has(net_id) or _host_entities[net_id] != node:
+		return
+	_cleanup_host_entity_tracking(net_id)
+	_pending_remote_deaths.erase(net_id)
+	if node != null and is_instance_valid(node):
+		# Don't retain a previous online-layer id when the pool reuses this node.
+		if node.has_meta("brotato_online_net_id") and str(node.get_meta("brotato_online_net_id")) == net_id:
+			node.remove_meta("brotato_online_net_id")
+			node.remove_meta("brotato_online_host_entity")
+			node.remove_meta("brotato_online_category")
+		if node.has_signal("died") and node.is_connected("died", self, "_on_host_local_entity_died"):
+			node.disconnect("died", self, "_on_host_local_entity_died")
+		if node.has_signal("took_damage") and node.is_connected("took_damage", self, "_on_host_local_boss_took_damage"):
+			node.disconnect("took_damage", self, "_on_host_local_boss_took_damage")
 
 
 func _cleanup_host_entity_tracking(id: String) -> void:
