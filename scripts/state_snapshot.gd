@@ -425,6 +425,10 @@ func _build_dynamic_entity_state_from_net_id(entity: Node, net_id: String, categ
 		"armor": _safe_int_from_object(current_stats, "armor", -1),
 		"status_flags": _build_status_flags_for_entity(entity, category)
 	}
+	# Boss/elite charging attacks use this flag as a gameplay condition. Preserve
+	# its Host value in the reliable birth/resync payload as well as motion frames.
+	if category == "boss" and entity.get("_move_locked") != null:
+		result["move_locked"] = bool(entity.get("_move_locked"))
 	if typeof(spawn_data_state) == TYPE_DICTIONARY and not spawn_data_state.empty():
 		result["spawn_data"] = spawn_data_state
 	if typeof(online_drop_result) == TYPE_DICTIONARY and not online_drop_result.empty():
@@ -595,7 +599,7 @@ func _build_dynamic_entity_motion_state(entity: Node, net_id: String, category: 
 	var pos = _vec_to_dict(_get_global_pos(entity))
 	_touch_dynamic_entity_tracking(entity, net_id, category, false)
 	_last_entity_pos_by_net_id[net_id] = pos
-	return {
+	var result = {
 		"net_id": net_id,
 		"category": category,
 		"entity_type": entity_type,
@@ -607,6 +611,9 @@ func _build_dynamic_entity_motion_state(entity: Node, net_id: String, category: 
 		"max_health": _safe_int_from_object(max_stats, "health", -1),
 		"status_flags": _build_status_flags_for_entity(entity, category)
 	}
+	if category == "boss" and entity.get("_move_locked") != null:
+		result["move_locked"] = bool(entity.get("_move_locked"))
+	return result
 
 
 func _ensure_spawner_signal_connections(locator: Node) -> void:

@@ -6013,7 +6013,7 @@ func _compact_host_motion_entities(snapshot: Dictionary) -> Array:
 		var cursed = false
 		if typeof(flags) == TYPE_DICTIONARY:
 			cursed = _safe_bool(flags.get("cursed", false))
-		result.append([
+		var row = [
 			str(entity.get("net_id", "")),
 			_category_to_compact_id(category),
 			int(entity.get("entity_type", -1)),
@@ -6027,7 +6027,11 @@ func _compact_host_motion_entities(snapshot: Dictionary) -> Array:
 			int(entity.get("armor", -1)),
 			1 if cursed else 0,
 			int(entity.get("player_index", -1))
-		])
+		]
+		# Optional trailing field: older clients keep reading the first 15 values.
+		if category == "boss" and entity.has("move_locked"):
+			row.append(1 if bool(entity.get("move_locked")) else 0)
+		result.append(row)
 	return result
 
 func _compact_wave_timer_state(snapshot: Dictionary) -> Array:
@@ -6140,6 +6144,8 @@ func _make_wire_entity_state(entity: Dictionary, legacy_enemy: bool) -> Dictiona
 		"armor": int(entity.get("armor", -1)),
 		"status_flags": entity.get("status_flags", {})
 	}
+	if str(entity.get("category", "")) == "boss" and entity.has("move_locked"):
+		result["move_locked"] = bool(entity.get("move_locked"))
 	if not legacy_enemy:
 		result["category"] = str(entity.get("category", ""))
 		result["sync_mode"] = str(entity.get("sync_mode", ""))
@@ -6236,6 +6242,9 @@ func _expand_compact_battle_snapshot(message: Dictionary) -> Dictionary:
 				"status_flags": {"cursed": int(row[13]) != 0},
 				"player_index": int(row[14])
 			}
+			# The first 15 fields are unchanged; old Host rows have no lock state.
+			if category == "boss" and row.size() >= 16:
+				entity_state["move_locked"] = int(row[15]) != 0
 			expanded["entities"].append(entity_state)
 
 	var packed_births = message.get("b", [])

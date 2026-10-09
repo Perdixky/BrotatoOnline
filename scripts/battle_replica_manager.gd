@@ -1526,7 +1526,9 @@ func _configure_host_motion_combat_entity(node: Node, category: String) -> void:
 	# Lock only their autonomous movement/AI so Host interpolation does not fight it.
 	if node.get("_can_move") != null:
 		node.set("_can_move", false)
-	if node.get("_move_locked") != null:
+	# For bosses _move_locked means "currently charging", not "Host owns motion".
+	# Host snapshots supply the real charge flag; keep the looter fallback unchanged.
+	if category != "boss" and node.get("_move_locked") != null:
 		node.set("_move_locked", true)
 	_disable_behavior_children(node)
 
@@ -1600,6 +1602,9 @@ func _apply_host_entity_state(node: Node, state: Dictionary) -> void:
 	_apply_host_spawn_data_state_to_existing_entity(node, state)
 	_apply_online_drop_result_to_entity(node, state)
 	_apply_status_flags_to_entity(node, state)
+	# Old Hosts omit this optional field; do not overwrite the local value then.
+	if str(state.get("category", "")) == "boss" and state.has("move_locked") and node.get("_move_locked") != null:
+		node.set("_move_locked", bool(state.get("move_locked")))
 
 
 func _apply_online_drop_result_to_entity(node: Node, state: Dictionary) -> void:
@@ -1848,6 +1853,11 @@ func _update_host_entity_positions(delta: float) -> void:
 		var node = _host_entities.get(id, null)
 		if not _is_valid_node(node):
 			continue
+		# Boss/elite phase changes may re-enable movement; keep Host-motion
+		# enemies locally stationary. Pets intentionally manage _can_move themselves.
+		var category = str(_host_entity_category.get(id, ""))
+		if (category == "boss" or category == "enemy") and node.get("_can_move") != null and bool(node.get("_can_move")):
+			node.set("_can_move", false)
 		var sample = _sample_position(_host_entity_samples.get(id, []), target_time, _host_entity_targets.get(id, _get_node_global_pos(node)), _host_entity_velocities.get(id, Vector2.ZERO))
 		var display_target = sample[0]
 		var current = _get_node_global_pos(node)
