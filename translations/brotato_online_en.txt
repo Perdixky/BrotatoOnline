@@ -15,6 +15,7 @@ BROTATO_ONLINE_INPUT_DEVICE_KEYBOARD,Keyboard and mouse
 BROTATO_ONLINE_INPUT_DEVICE_UNKNOWN_GAMEPAD,Unknown controller
 BROTATO_ONLINE_INPUT_DEVICE_GAMEPAD_FORMAT,%s (Device %d)
 BROTATO_ONLINE_LOCAL_CHARACTER_OUTLINE,Outline local character
+BROTATO_ONLINE_SHARE_LOCAL_AIM,Share local aiming direction
 BROTATO_ONLINE_LOCAL_CHARACTER_OUTLINE_DESC,In online battles, add a character outline only to the player controlled on this machine.
 BROTATO_ONLINE_QUICK_CHAT_DISABLE_CUSTOM,Disable custom quick chat
 BROTATO_ONLINE_QUICK_CHAT_CUSTOM_TITLE,Customize quick chat

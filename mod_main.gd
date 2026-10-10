@@ -18,6 +18,7 @@ func _init() -> void:
 	_install_focus_emulator_safe_disconnect_extension()
 	_install_shop_item_lock_event_extension()
 	_install_pause_menu_focus_safe_extension()
+	_install_utils_online_manual_aim_extension()
 	ModLoaderMod.install_script_extension(mod_dir_path.plus_file("extensions/progress_data_removed_players.gd"))
 
 
@@ -100,6 +101,13 @@ func _install_pause_menu_focus_safe_extension() -> void:
 	if file.file_exists(extension_path):
 		ModLoaderMod.install_script_extension(extension_path)
 
+
+
+func _install_utils_online_manual_aim_extension() -> void:
+	var extension_path = mod_dir_path.plus_file("extensions/utils_online_manual_aim.gd")
+	var file = File.new()
+	if file.file_exists(extension_path):
+		ModLoaderMod.install_script_extension(extension_path)
 
 
 func _install_player_local_outline_extension() -> void:

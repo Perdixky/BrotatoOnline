@@ -7,6 +7,8 @@ const KEY_BLOCKED_STEAM_IDS = "blocked_steam_ids"
 const MAX_BLOCKED_STEAM_USERS = 768
 const KEY_LOCAL_CHARACTER_OUTLINE = "local_character_outline"
 const DEFAULT_LOCAL_CHARACTER_OUTLINE = false
+const KEY_SHARE_LOCAL_AIM = "share_local_aim"
+const DEFAULT_SHARE_LOCAL_AIM = false
 const KEY_LOCAL_INPUT_DEVICE_MODE = "local_input_device_mode"
 const KEY_LOCAL_INPUT_JOYPAD_ID = "local_input_joypad_id"
 const KEY_LOCAL_INPUT_JOYPAD_NAME = "local_input_joypad_name"
@@ -56,6 +58,7 @@ const META_LOCAL_OUTLINE_COLOR = "brotato_online_local_outline_color"
 const META_LOCAL_OUTLINE_OWNED = "brotato_online_local_outline_owned"
 
 var _local_character_outline_enabled = DEFAULT_LOCAL_CHARACTER_OUTLINE
+var _share_local_aim_enabled = DEFAULT_SHARE_LOCAL_AIM
 var _local_input_device_mode = DEFAULT_LOCAL_INPUT_DEVICE_MODE
 var _local_input_joypad_id = -1
 var _local_input_joypad_name = ""
@@ -68,6 +71,7 @@ var _last_scan_msec = 0
 var _settings_button = null
 var _settings_overlay = null
 var _local_outline_button = null
+var _share_local_aim_button = null
 var _local_outline_description_label = null
 var _input_device_label = null
 var _input_device_option_button = null
@@ -167,6 +171,19 @@ func set_local_character_outline_enabled(enabled: bool) -> void:
 	_save_settings()
 	_publish_settings_meta()
 	_apply_outline_to_live_players()
+
+
+func get_share_local_aim_enabled() -> bool:
+	return _share_local_aim_enabled
+
+
+func set_share_local_aim_enabled(enabled: bool) -> void:
+	if _share_local_aim_enabled == enabled:
+		return
+	_share_local_aim_enabled = enabled
+	_save_settings()
+	if _share_local_aim_button != null and is_instance_valid(_share_local_aim_button):
+		_share_local_aim_button.set_pressed_no_signal(enabled)
 
 
 func get_local_input_device_mode() -> String:
@@ -386,6 +403,7 @@ func _load_settings() -> void:
 			KEY_LOCAL_CHARACTER_OUTLINE,
 			DEFAULT_LOCAL_CHARACTER_OUTLINE
 		))
+		_share_local_aim_enabled = bool(config.get_value(SETTINGS_SECTION, KEY_SHARE_LOCAL_AIM, DEFAULT_SHARE_LOCAL_AIM))
 		_local_input_device_mode = str(config.get_value(
 			SETTINGS_SECTION,
 			KEY_LOCAL_INPUT_DEVICE_MODE,
@@ -439,6 +457,7 @@ func _load_settings() -> void:
 			_local_input_device_mode = INPUT_DEVICE_MODE_AUTO
 	else:
 		_local_character_outline_enabled = DEFAULT_LOCAL_CHARACTER_OUTLINE
+		_share_local_aim_enabled = DEFAULT_SHARE_LOCAL_AIM
 		_local_input_device_mode = DEFAULT_LOCAL_INPUT_DEVICE_MODE
 		_local_input_joypad_id = -1
 		_local_input_joypad_name = ""
@@ -453,6 +472,7 @@ func _save_settings() -> void:
 	var config = ConfigFile.new()
 	var _load_err = config.load(SETTINGS_FILE_PATH)
 	config.set_value(SETTINGS_SECTION, KEY_LOCAL_CHARACTER_OUTLINE, _local_character_outline_enabled)
+	config.set_value(SETTINGS_SECTION, KEY_SHARE_LOCAL_AIM, _share_local_aim_enabled)
 	config.set_value(SETTINGS_SECTION, KEY_LOCAL_INPUT_DEVICE_MODE, _local_input_device_mode)
 	config.set_value(SETTINGS_SECTION, KEY_LOCAL_INPUT_JOYPAD_ID, _local_input_joypad_id)
 	config.set_value(SETTINGS_SECTION, KEY_LOCAL_INPUT_JOYPAD_NAME, _local_input_joypad_name)
@@ -602,25 +622,26 @@ func _ensure_settings_overlay(title_screen: Node) -> void:
 		_settings_panel = existing_overlay.get_node_or_null("CenterContainer/PanelContainer")
 		_title_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/TitleLabel")
 		_controls_help_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ControlsHelpLabel")
-		_local_outline_button = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/LocalCharacterOutlineButton")
-		_local_outline_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/LocalCharacterOutlineDescriptionLabel")
-		_input_device_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/InputDeviceLabel")
-		_input_device_option_button = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/InputDeviceOptionButton")
-		_input_device_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/InputDeviceDescriptionLabel")
-		_room_name_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/RoomNameLabel")
-		_room_name_editor = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/RoomNameAndPortRow/RoomNameEditor")
-		_host_port_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/RoomNameAndPortRow/HostPortLabel")
-		_host_port_editor = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/RoomNameAndPortRow/HostPortEditor")
-		_room_name_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/RoomNameDescriptionLabel")
-		_host_port_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/HostPortDescriptionLabel")
+		_local_outline_button = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/LocalCharacterOutlineButton")
+		_local_outline_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/LocalCharacterOutlineDescriptionLabel")
+		_share_local_aim_button = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/ShareLocalAimButton")
+		_input_device_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/InputDeviceLabel")
+		_input_device_option_button = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/InputDeviceOptionButton")
+		_input_device_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/InputDeviceDescriptionLabel")
+		_room_name_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/RoomNameLabel")
+		_room_name_editor = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/RoomNameAndPortRow/RoomNameEditor")
+		_host_port_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/RoomNameAndPortRow/HostPortLabel")
+		_host_port_editor = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/RoomNameAndPortRow/HostPortEditor")
+		_room_name_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/RoomNameDescriptionLabel")
+		_host_port_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/HostPortDescriptionLabel")
 		if _room_name_editor != null and is_instance_valid(_room_name_editor):
 			_configure_room_name_editor(_room_name_editor)
 		if _host_port_editor != null and is_instance_valid(_host_port_editor):
 			_configure_host_port_editor(_host_port_editor)
-		_disable_custom_quick_chat_button = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/DisableCustomQuickChatButton")
-		_quick_chat_customize_toggle = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/QuickChatCustomizeToggle")
-		_quick_chat_customize_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/QuickChatCustomizeDescriptionLabel")
-		_quick_chat_customize_container = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/QuickChatCustomizeGrid")
+		_disable_custom_quick_chat_button = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/DisableCustomQuickChatButton")
+		_quick_chat_customize_toggle = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/QuickChatCustomizeToggle")
+		_quick_chat_customize_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/QuickChatCustomizeDescriptionLabel")
+		_quick_chat_customize_container = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/QuickChatCustomizeGrid")
 		_quick_chat_editors.clear()
 		if _quick_chat_customize_container != null and is_instance_valid(_quick_chat_customize_container):
 			for option_id in QUICK_CHAT_OPTION_IDS:
@@ -628,10 +649,11 @@ func _ensure_settings_overlay(title_screen: Node) -> void:
 				if editor != null and is_instance_valid(editor):
 					_configure_quick_chat_editor(editor, str(option_id))
 					_quick_chat_editors[str(option_id)] = editor
-		_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/DescriptionLabel")
+		_description_label = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/ScrollContainer/SettingsContent/DescriptionLabel")
 		_back_button = existing_overlay.get_node_or_null("CenterContainer/PanelContainer/MarginContainer/VBoxContainer/BackButton")
 		_connect_runtime_mouse_focus(_input_device_option_button)
 		_connect_runtime_mouse_focus(_local_outline_button)
+		_connect_runtime_mouse_focus(_share_local_aim_button)
 		_connect_runtime_mouse_focus(_disable_custom_quick_chat_button)
 		_connect_runtime_mouse_focus(_quick_chat_customize_toggle)
 		_connect_runtime_mouse_focus(_back_button)
@@ -665,7 +687,8 @@ func _ensure_settings_overlay(title_screen: Node) -> void:
 
 	var panel = PanelContainer.new()
 	panel.name = "PanelContainer"
-	panel.rect_min_size = Vector2(900, 650)
+	var viewport_size = get_viewport().get_visible_rect().size
+	panel.rect_min_size = Vector2(min(900.0, max(0.0, viewport_size.x - 32.0)), max(0.0, viewport_size.y - 32.0))
 	center.add_child(panel)
 	_settings_panel = panel
 
@@ -696,6 +719,24 @@ func _ensure_settings_overlay(title_screen: Node) -> void:
 	controls_help.align = Label.ALIGN_CENTER
 	vbox.add_child(controls_help)
 	_controls_help_label = controls_help
+
+	# Godot's ScrollContainer clips tall settings, including expanded quick-chat
+	# editors. Keep the title and the Back button outside the scroll region.
+	var root_vbox = vbox
+	var scroll = ScrollContainer.new()
+	scroll.name = "ScrollContainer"
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.rect_min_size = Vector2(0, 0)
+	scroll.scroll_horizontal_enabled = false
+	scroll.follow_focus = true
+	root_vbox.add_child(scroll)
+
+	vbox = VBoxContainer.new()
+	vbox.name = "SettingsContent"
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_constant_override("separation", 12)
+	scroll.add_child(vbox)
 
 	var room_name_label = Label.new()
 	room_name_label.name = "RoomNameLabel"
@@ -799,6 +840,20 @@ func _ensure_settings_overlay(title_screen: Node) -> void:
 	_local_outline_description_label = local_outline_description
 	_description_label = local_outline_description
 
+	var share_local_aim_button = CheckButton.new()
+	share_local_aim_button.name = "ShareLocalAimButton"
+	share_local_aim_button.text = _txt("BROTATO_ONLINE_SHARE_LOCAL_AIM")
+	share_local_aim_button.pressed = _share_local_aim_enabled
+	share_local_aim_button.rect_min_size = Vector2(0, 68)
+	share_local_aim_button.focus_mode = Control.FOCUS_ALL
+	share_local_aim_button.mouse_filter = Control.MOUSE_FILTER_STOP
+	share_local_aim_button.align = 0
+	_configure_option_check_button(share_local_aim_button)
+	vbox.add_child(share_local_aim_button)
+	var _share_local_aim_err = share_local_aim_button.connect("toggled", self, "_on_share_local_aim_toggled")
+	_share_local_aim_button = share_local_aim_button
+	_connect_runtime_mouse_focus(_share_local_aim_button)
+
 	var quick_chat_separator = _create_settings_separator("QuickChatSeparator")
 	vbox.add_child(quick_chat_separator)
 
@@ -837,7 +892,7 @@ func _ensure_settings_overlay(title_screen: Node) -> void:
 
 	var quick_chat_grid = GridContainer.new()
 	quick_chat_grid.name = "QuickChatCustomizeGrid"
-	quick_chat_grid.columns = 4
+	quick_chat_grid.columns = 4 if viewport_size.x >= 950.0 else 2
 	quick_chat_grid.add_constant_override("hseparation", 10)
 	quick_chat_grid.add_constant_override("vseparation", 8)
 	quick_chat_grid.visible = false
@@ -870,13 +925,8 @@ func _ensure_settings_overlay(title_screen: Node) -> void:
 		_configure_quick_chat_editor(editor, option_id)
 		_quick_chat_editors[option_id] = editor
 
-	var spacer = Control.new()
-	spacer.name = "Spacer"
-	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	vbox.add_child(spacer)
-
 	var back_separator = _create_settings_separator("BackSeparator")
-	vbox.add_child(back_separator)
+	root_vbox.add_child(back_separator)
 
 	var back_button = Button.new()
 	back_button.name = "BackButton"
@@ -886,7 +936,7 @@ func _ensure_settings_overlay(title_screen: Node) -> void:
 	back_button.focus_mode = Control.FOCUS_ALL
 	back_button.mouse_filter = Control.MOUSE_FILTER_STOP
 	_configure_settings_action_button(back_button)
-	vbox.add_child(back_button)
+	root_vbox.add_child(back_button)
 	var _back_err = back_button.connect("pressed", self, "_close_settings_overlay")
 	_back_button = back_button
 	_connect_runtime_mouse_focus(_back_button)
@@ -1186,7 +1236,9 @@ func _refresh_localized_texts() -> void:
 		_local_outline_button.text = _txt("BROTATO_ONLINE_LOCAL_CHARACTER_OUTLINE")
 	if _local_outline_description_label != null and is_instance_valid(_local_outline_description_label):
 		_local_outline_description_label.text = _txt("BROTATO_ONLINE_LOCAL_CHARACTER_OUTLINE_DESC")
-	elif _description_label != null and is_instance_valid(_description_label):
+	if _share_local_aim_button != null and is_instance_valid(_share_local_aim_button):
+		_share_local_aim_button.text = _txt("BROTATO_ONLINE_SHARE_LOCAL_AIM")
+	if _description_label != null and is_instance_valid(_description_label):
 		_description_label.text = _txt("BROTATO_ONLINE_LOCAL_CHARACTER_OUTLINE_DESC")
 	if _room_name_label != null and is_instance_valid(_room_name_label):
 		_room_name_label.text = _txt("BROTATO_ONLINE_ROOM_NAME")
@@ -1291,8 +1343,6 @@ func _on_quick_chat_customize_toggled(button_pressed: bool) -> void:
 		_quick_chat_customize_description_label.visible = button_pressed
 	if _quick_chat_customize_container != null and is_instance_valid(_quick_chat_customize_container):
 		_quick_chat_customize_container.visible = button_pressed
-	if _settings_panel != null and is_instance_valid(_settings_panel):
-		_settings_panel.rect_min_size = Vector2(900, 790 if button_pressed else 650)
 	_refresh_localized_texts()
 
 
@@ -1480,6 +1530,8 @@ func _open_settings_overlay() -> void:
 		_host_port_editor.text = str(get_lan_host_port())
 	if _local_outline_button != null and is_instance_valid(_local_outline_button):
 		_local_outline_button.set_pressed_no_signal(_local_character_outline_enabled)
+	if _share_local_aim_button != null and is_instance_valid(_share_local_aim_button):
+		_share_local_aim_button.set_pressed_no_signal(_share_local_aim_enabled)
 	if _disable_custom_quick_chat_button != null and is_instance_valid(_disable_custom_quick_chat_button):
 		_disable_custom_quick_chat_button.set_pressed_no_signal(_disable_custom_quick_chat_enabled)
 	for option_id in _quick_chat_editors.keys():
@@ -1493,8 +1545,6 @@ func _open_settings_overlay() -> void:
 		_quick_chat_customize_description_label.visible = quick_chat_expanded
 	if _quick_chat_customize_container != null and is_instance_valid(_quick_chat_customize_container):
 		_quick_chat_customize_container.visible = quick_chat_expanded
-	if _settings_panel != null and is_instance_valid(_settings_panel):
-		_settings_panel.rect_min_size = Vector2(900, 790 if quick_chat_expanded else 650)
 
 	_refresh_localized_texts()
 	_settings_overlay.show()
@@ -1541,6 +1591,10 @@ func _on_input_device_item_selected(index: int) -> void:
 	)
 	_last_input_device_list_key = ""
 	_refresh_input_device_options(true)
+
+
+func _on_share_local_aim_toggled(button_pressed: bool) -> void:
+	set_share_local_aim_enabled(button_pressed)
 
 
 func _on_local_character_outline_toggled(button_pressed: bool) -> void:

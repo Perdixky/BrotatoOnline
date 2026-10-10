@@ -24,7 +24,6 @@ extends "res://main.gd"
 var _brotato_online_drop_prediction_wave = -1
 var _brotato_online_predicted_item_boxes_this_wave = 0
 
-
 func _brotato_online_get_current_drop_wave() -> int:
 	if RunData == null:
 		return -1
@@ -835,6 +834,8 @@ func add_node_to_pool(node: Node, id: int) -> void:
 
 
 func _exit_tree() -> void:
+	if _crosshair_cursor_active:
+		_set_crosshair_cursor(false)
 	if not _brotato_online_is_online_session_active():
 		._exit_tree()
 		return
@@ -936,3 +937,56 @@ func _brotato_online_is_action_just_released_safe(action_name: String) -> bool:
 	if action_name == "" or not InputMap.has_action(action_name):
 		return false
 	return Input.is_action_just_released(action_name)
+
+
+# Brotato's InputService hides the OS cursor for co-op when there are 2+ players.
+# For online keyboard/mouse manual aiming, render the vanilla crosshair Sprite
+# at the actual mouse position instead. Do not call set_mouse_mode() or install
+# another OS cursor here: InputService and CursorManager would override it on
+# every input event, making the crosshair flash and appear incorrectly sized.
+# Offline / local co-op preserve vanilla behavior untouched.
+func _handle_manual_aim_visuals() -> void:
+	if not RunData.is_coop_run or not _brotato_online_is_online_session_active():
+		._handle_manual_aim_visuals()
+		return
+
+	if _crosshair_cursor_active:
+		_set_crosshair_cursor(false)
+	if _cleaning_up:
+		_crosshair.hide()
+		return
+
+	var slot_manager = _brotato_online_get_slot_manager()
+	var local_indices = []
+	if slot_manager != null and slot_manager.has_method("get_local_mirrored_player_index"):
+		var mirrored_index = int(slot_manager.get_local_mirrored_player_index())
+		if mirrored_index >= 0:
+			local_indices.append(mirrored_index)
+	if local_indices.empty() and slot_manager != null and slot_manager.has_method("get_local_player_indices"):
+		local_indices = slot_manager.get_local_player_indices()
+
+	var keyboard_mouse_aim = false
+	for index_value in local_indices:
+		var index = int(index_value)
+		if index < 0 or index >= RunData.get_player_count() or Utils.is_player_using_gamepad(index):
+			continue
+		if Utils.is_manual_aim(index) or (ProgressData.settings.manual_aim and ProgressData.settings.manual_aim_on_mouse_press):
+			keyboard_mouse_aim = true
+			break
+	if not keyboard_mouse_aim:
+		_crosshair.hide()
+		return
+
+	# Crosshair is a world-space Sprite. Convert the viewport mouse position
+	# through the canvas transform so it stays under the pointer as the camera
+	# follows players, zooms, or shakes. Leave the original crosshair size unchanged.
+	if _crosshair.texture == null:
+		_crosshair.texture = load("res://ui/manual_cursor.png")
+	if _crosshair.texture == null:
+		_crosshair.texture = load("res://ui/custom_cursor.png")
+	if _crosshair.texture == null:
+		_crosshair.hide()
+		return
+	_crosshair.global_position = get_viewport().get_canvas_transform().affine_inverse().xform(get_viewport().get_mouse_position())
+	if not _crosshair.visible:
+		_crosshair.show()

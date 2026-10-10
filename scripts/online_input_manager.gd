@@ -11,12 +11,19 @@ const SEND_INTERVAL_MSEC = 33
 const HEARTBEAT_INTERVAL_MSEC = 150
 const REMOTE_INPUT_TIMEOUT_MSEC = 300
 const ACTION_DEADZONE = 0.15
+const SHARED_AIM_TIMEOUT_MSEC = 1250
 
 
 var _last_send_msec = 0
 var _last_heartbeat_msec = 0
 var _last_sent_key = ""
 var _local_tick = 0
+var _host_local_aim_tick = 0
+var _last_host_local_aim_send_msec = 0
+var _last_host_local_aim_heartbeat_msec = 0
+var _host_local_aim_keys = {}
+# Non-host: shared aim packets relayed by the host, keyed by player_index.
+var _shared_aim_by_player = {}
 
 # player_index -> {"move": Vector2, "aim": Vector2, "tick": int, "last_seen_msec": int}
 var _remote_input_by_player = {}
@@ -32,56 +39,74 @@ func _ready() -> void:
 func _physics_process(_delta: float) -> void:
 	if not _is_in_authoritative_game_context():
 		_release_all_remote_actions()
+		_remote_input_by_player.clear()
+		_shared_aim_by_player.clear()
+		_host_local_aim_keys.clear()
 		return
 
-	if not _is_host():
-		return
+	if _is_host():
+		_apply_remote_inputs_to_official_actions()
+	else:
+		_apply_shared_aim_to_remote_players()
 
-	_apply_remote_inputs_to_official_actions()
-
-func receive_battle_input(from_steam_id: String, message: Dictionary) -> void:
+func receive_battle_input(from_steam_id: String, message: Dictionary) -> Dictionary:
 	# Host side. Called by SteamLobbyManager when a P2P message arrives.
 	if not _is_host():
-		return
+		return {}
 	if typeof(message) != TYPE_DICTIONARY:
-		return
+		return {}
 	if str(message.get("msg_type", "")) != "battle_input":
-		return
+		return {}
 
 	var slot_manager = _get_slot_manager()
 	if slot_manager == null or not slot_manager.has_method("get_player_index_for_steam_id"):
-		return
+		return {}
 
 	var player_index = int(slot_manager.get_player_index_for_steam_id(from_steam_id))
 	if player_index < 0 or player_index >= RunData.get_player_count():
-		return
+		return {}
 
 	# 防止把 Host 本地玩家输入也当作远程输入覆盖。
 	if slot_manager.has_method("is_remote_player_index") and not bool(slot_manager.is_remote_player_index(player_index)):
-		return
+		return {}
 
 	var move = _sanitize_vector(_dict_to_vec(message.get("move", {})))
-	var aim = _sanitize_vector(_dict_to_vec(message.get("aim", {})))
+	var sharing = bool(message.get("share_aim", false))
+	var aim = _sanitize_vector(_dict_to_vec(message.get("aim", {}))) if sharing else Vector2.ZERO
+	sharing = sharing and aim.length_squared() > 0.05
 	var tick = int(message.get("tick", 0))
 	# battle_input is intentionally unreliable/latest-only. Ignore duplicate or
 	# out-of-order samples so a late UDP-style packet cannot rewind movement.
 	var previous = _remote_input_by_player.get(player_index, {})
+	var was_sharing = bool(previous.get("share_aim", false)) if typeof(previous) == TYPE_DICTIONARY else false
 	if typeof(previous) == TYPE_DICTIONARY and str(previous.get("steam_id", "")) == from_steam_id:
 		var previous_tick = int(previous.get("tick", -1))
 		if tick > 0 and previous_tick >= tick:
-			return
+			return {}
 
 	_remote_input_by_player[player_index] = {
 		"steam_id": from_steam_id,
 		"move": move,
 		"aim": aim,
+		"share_aim": sharing,
 		"tick": tick,
 		"last_seen_msec": OS.get_ticks_msec()
 	}
 
+	# Relay only data explicitly shared by the owner. A disabled packet cancels
+	# a previously active aim even when the sending toggle is turned off midwave.
+	if not sharing and not was_sharing:
+		return {}
+	return _make_shared_aim_message(player_index, tick, sharing, aim)
+
 
 func clear_remote_inputs() -> void:
 	_remote_input_by_player.clear()
+	_shared_aim_by_player.clear()
+	_host_local_aim_keys.clear()
+	_last_sent_key = ""
+	_last_send_msec = 0
+	_last_heartbeat_msec = 0
 	_release_all_remote_actions()
 
 
@@ -96,7 +121,7 @@ func _apply_remote_inputs_to_official_actions() -> void:
 
 		var age = now - int(input_state.get("last_seen_msec", 0))
 		var move = input_state.get("move", Vector2.ZERO)
-		var aim = input_state.get("aim", Vector2.ZERO)
+		var aim = input_state.get("aim", Vector2.ZERO) if _original_manual_setting_enabled() and bool(input_state.get("share_aim", false)) else Vector2.ZERO
 		if age > REMOTE_INPUT_TIMEOUT_MSEC:
 			move = Vector2.ZERO
 			aim = Vector2.ZERO
@@ -302,8 +327,10 @@ func consume_local_battle_input_messages() -> Array:
 		return messages
 
 	var move = _read_move_vector_for_device(device)
-	var aim = _read_aim_vector_for_device(device)
-	var key = _vector_key(move) + "|" + _vector_key(aim)
+	var sharing = _should_share_local_aim(player_index)
+	var aim = _read_aim_for_player(player_index, device) if sharing else Vector2.ZERO
+	sharing = sharing and aim.length_squared() > 0.05
+	var key = _vector_key(move) + "|" + _vector_key(aim) + "|" + str(sharing)
 	var should_send = key != _last_sent_key or now - _last_heartbeat_msec >= HEARTBEAT_INTERVAL_MSEC
 	if not should_send:
 		return messages
@@ -318,6 +345,7 @@ func consume_local_battle_input_messages() -> Array:
 		"player_index": player_index,
 		"move": _vec_to_dict(move),
 		"aim": _vec_to_dict(aim),
+		"share_aim": sharing,
 		"actions": {}
 	})
 	return messages
@@ -348,3 +376,154 @@ func _read_aim_vector_for_device(device: int) -> Vector2:
 		"rjoy_down_" + str(device)
 	)
 	return _sanitize_vector(aim)
+
+
+# Sender opt-in is separate from the vanilla manual aim setting. No aim
+# direction is exported when either switch is off.
+func _should_share_local_aim(player_index: int) -> bool:
+	var settings = get_parent().get_node_or_null("BrotatoOnlineModSettingsManager")
+	if settings == null or not settings.has_method("get_share_local_aim_enabled"):
+		return false
+	return bool(settings.get_share_local_aim_enabled()) and bool(Utils.is_manual_aim(player_index))
+
+
+func _original_manual_setting_enabled() -> bool:
+	return bool(ProgressData.settings.manual_aim) or bool(ProgressData.settings.manual_aim_on_mouse_press)
+
+
+func is_local_player_index(player_index: int) -> bool:
+	var slot_manager = _get_slot_manager()
+	if slot_manager == null:
+		return false
+	if _is_host():
+		return slot_manager.has_method("is_remote_player_index") and not bool(slot_manager.is_remote_player_index(player_index))
+	return player_index == _get_local_player_index()
+
+
+func _read_aim_for_player(player_index: int, device: int) -> Vector2:
+	if not Utils.is_player_using_gamepad(player_index):
+		var player = _get_battle_player(player_index)
+		if player != null and player is Node2D:
+			return _sanitize_vector((player.get_global_mouse_position() - player.global_position).normalized())
+		return Vector2.ZERO
+
+	var stick = _read_aim_vector_for_device(device)
+	if stick.length_squared() > 0.05:
+		return stick.normalized()
+	# Vanilla retains the previous right-stick attack direction when released.
+	var player = _get_battle_player(player_index)
+	if player != null:
+		var last_direction = player.get("gamepad_attack_vector")
+		if typeof(last_direction) == TYPE_VECTOR2:
+			return _sanitize_vector(last_direction.normalized())
+	return Vector2.RIGHT
+
+
+func _get_battle_player(player_index: int) -> Node:
+	var main = get_node_or_null("/root/Main")
+	if main == null:
+		main = get_tree().current_scene
+	if main == null or str(main.name) != "Main":
+		return null
+	var players = main.get("_players")
+	if typeof(players) != TYPE_ARRAY or player_index < 0 or player_index >= players.size():
+		return null
+	var player = players[player_index]
+	return player if player != null and is_instance_valid(player) else null
+
+
+func _make_shared_aim_message(player_index: int, tick: int, sharing: bool, aim: Vector2) -> Dictionary:
+	return {
+		"msg_type": "battle_aim",
+		"player_index": player_index,
+		"tick": tick,
+		"sharing": sharing,
+		"aim": _vec_to_dict(aim if sharing else Vector2.ZERO)
+	}
+
+
+# The host also needs to send its own local character's aim, since it does not
+# send battle_input to itself. Host local-coop slots are supported individually.
+func consume_host_local_shared_aim_messages() -> Array:
+	var result = []
+	if not _is_host() or not _is_in_authoritative_game_context():
+		return result
+	var now = OS.get_ticks_msec()
+	if now - _last_host_local_aim_send_msec < SEND_INTERVAL_MSEC:
+		return result
+	_last_host_local_aim_send_msec = now
+	var slot_manager = _get_slot_manager()
+	if slot_manager == null or not slot_manager.has_method("get_local_player_indices"):
+		return result
+	var active = {}
+	var sent_active_aim = false
+	for raw_index in slot_manager.get_local_player_indices():
+		var index = int(raw_index)
+		if index < 0 or index >= RunData.get_player_count():
+			continue
+		var device = CoopService.get_remapped_player_device(index)
+		if device < 0:
+			continue
+		active[index] = true
+		var sharing = _should_share_local_aim(index)
+		var aim = _read_aim_for_player(index, device) if sharing else Vector2.ZERO
+		sharing = sharing and aim.length_squared() > 0.05
+		var key = ("1" if sharing else "0") + "|" + _vector_key(aim)
+		var prev_key = str(_host_local_aim_keys.get(index, ""))
+		if key == prev_key and (not sharing or now - _last_host_local_aim_heartbeat_msec < HEARTBEAT_INTERVAL_MSEC):
+			continue
+		_host_local_aim_keys[index] = key
+		_host_local_aim_tick += 1
+		if sharing or prev_key.begins_with("1|"):
+			result.append(_make_shared_aim_message(index, _host_local_aim_tick, sharing, aim))
+			if sharing:
+				sent_active_aim = true
+	for old_index in _host_local_aim_keys.keys():
+		if not active.has(int(old_index)):
+			_host_local_aim_keys.erase(old_index)
+	if sent_active_aim:
+		_last_host_local_aim_heartbeat_msec = now
+	return result
+
+
+func receive_shared_aim_from_host(message: Dictionary) -> void:
+	if _is_host() or not _is_in_authoritative_game_context():
+		return
+	var index = int(message.get("player_index", -1))
+	if index < 0 or index >= RunData.get_player_count() or is_local_player_index(index):
+		return
+	var tick = int(message.get("tick", 0))
+	var previous = _shared_aim_by_player.get(index, {})
+	if typeof(previous) == TYPE_DICTIONARY and tick > 0 and int(previous.get("tick", -1)) >= tick:
+		return
+	var sharing = bool(message.get("sharing", false))
+	var aim = _sanitize_vector(_dict_to_vec(message.get("aim", {}))) if sharing else Vector2.ZERO
+	sharing = sharing and aim.length_squared() > 0.05
+	_shared_aim_by_player[index] = {"tick": tick, "sharing": sharing, "aim": aim, "last_seen_msec": OS.get_ticks_msec()}
+
+
+func is_remote_shared_manual_aim_active(player_index: int) -> bool:
+	if not _is_in_authoritative_game_context() or is_local_player_index(player_index):
+		return false
+	if not _original_manual_setting_enabled():
+		return false
+	var state = _remote_input_by_player.get(player_index, {}) if _is_host() else _shared_aim_by_player.get(player_index, {})
+	if typeof(state) != TYPE_DICTIONARY or not bool(state.get("share_aim", state.get("sharing", false))):
+		return false
+	return OS.get_ticks_msec() - int(state.get("last_seen_msec", 0)) <= SHARED_AIM_TIMEOUT_MSEC
+
+
+func _apply_shared_aim_to_remote_players() -> void:
+	if not _original_manual_setting_enabled():
+		return
+	for raw_index in _shared_aim_by_player.keys():
+		var index = int(raw_index)
+		if not is_remote_shared_manual_aim_active(index):
+			continue
+		var state = _shared_aim_by_player[index]
+		var player = _get_battle_player(index)
+		if player == null:
+			continue
+		var direction = state.get("aim", Vector2.ZERO)
+		if typeof(direction) == TYPE_VECTOR2 and direction.length_squared() > 0.05:
+			player.set("gamepad_attack_vector", direction.normalized())
