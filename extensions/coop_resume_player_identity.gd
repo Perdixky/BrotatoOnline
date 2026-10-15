@@ -22,5 +22,15 @@ func identity_resume_committed() -> void:
 	_setup_next_player()
 
 
+func identity_resume_offline() -> void:
+	# Inputs may already have joined while online creation was in flight. Rebuild
+	# vanilla's pending queue before enabling its normal join callbacks again.
+	_players_to_join.clear()
+	for index in range(CoopService.connected_players.size(), RunData.get_player_count()):
+		_players_to_join.append(index)
+	CoopService.listening_for_inputs = true
+	_setup_next_player()
+
+
 func _identity_manager():
 	return get_node_or_null("/root/ModLoader/six666-BrotatoOnline/BrotatoOnlinePlayerIdentityManager")

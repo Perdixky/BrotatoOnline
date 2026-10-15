@@ -152,3 +152,14 @@ BROTATO_ONLINE_IDENTITY_INVALID,Assign a different player to each character; joi
 BROTATO_ONLINE_IDENTITY_HOST_FIRST,P1 must belong to host local player 1.
 BROTATO_ONLINE_STEAM_IDENTITY_FAILED,"Unable to verify resume identity. Use the original game user directory, or ask the host to reassign characters."
 BROTATO_ONLINE_IDENTITY_ABSENT,Waiting to join
+BROTATO_ONLINE_IDENTITY_SESSION_FAILED,Could not create an online room. Retry or continue local co-op using this computer’s inputs.
+BROTATO_ONLINE_IDENTITY_RETRY,Retry creating room
+BROTATO_ONLINE_IDENTITY_OFFLINE,Continue local co-op
+BROTATO_ONLINE_IDENTITY_ASSIGN_HINT,Choose a player for each character and confirm. LAN newcomers rejected earlier must reconnect; Steam members are checked again.
+BROTATO_ONLINE_IDENTITY_NOT_CONNECTED,"Waiting for %s to connect. To replace a player, open Reassign characters first."
+BROTATO_ONLINE_IDENTITY_HANDSHAKE,Waiting for %s to finish joining. Please wait or ask that player to reconnect.
+BROTATO_ONLINE_IDENTITY_LOCAL_COUNT,This assignment needs %s local players; %s have joined. Adjust the joined local players or reassign characters.
+BROTATO_ONLINE_IDENTITY_PROOF_MISSING,"This save has no LAN resume proof. Open Reassign characters, then ask that player to connect."
+BROTATO_ONLINE_IDENTITY_HOST_CHANGED,The current host identity differs from this save. Reassign characters or continue local co-op.
+BROTATO_ONLINE_STEAM_DUPLICATE_IDENTITY,This identity is already connected. Close the duplicate game instance and retry.
+BROTATO_ONLINE_STEAM_RESUME_REASSIGNMENT_REQUIRED,"This room is waiting for the saved players. Ask the host to open Reassign characters, then reconnect."

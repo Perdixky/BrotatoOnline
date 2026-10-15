@@ -8,7 +8,7 @@ const MAX_LOBBY_MEMBERS = 4
 const NETWORK_PROTOCOL_VERSION = "4.0.0"
 const DEFAULT_LAN_PORT = 27462
 const LAN_DISCOVERY_PORT = 27463
-const LAN_PROTOCOL_VERSION = 2
+const LAN_PROTOCOL_VERSION = 3
 # Optional pre-join host mod metadata. This is deliberately independent from
 # NETWORK_PROTOCOL_VERSION/LAN_PROTOCOL_VERSION so older clients keep working.
 const HOST_MODS_FORMAT_VERSION = "1"
@@ -613,14 +613,11 @@ func _handle_transport_identity(transport: Node, peer, message: Dictionary) -> v
 		if _is_game_host() or not (_pending_lan_join or (_session_active and _online_role == "client")):
 			return
 		if int(message.get("protocol_version", 0)) != LAN_PROTOCOL_VERSION or str(message.get("mod_version", "")) != NETWORK_PROTOCOL_VERSION:
-			_pending_lan_join = false
-			transport.stop()
-			_show_join_failure(_ui_text("join_failed_protocol_mismatch"))
+			_fail_lan_handshake(transport, "join_failed_protocol_mismatch")
 			return
 		var credential = identity.client_identity_for_run(str(message.get("run_id", "")))
 		if credential.empty():
-			transport.stop()
-			_show_join_failure(_ui_text("identity_failed"))
+			_fail_lan_handshake(transport, "identity_failed")
 			return
 		credential["msg_type"] = "transport_identity"
 		credential["run_id"] = str(message.run_id)
@@ -643,12 +640,14 @@ func _handle_transport_identity(transport: Node, peer, message: Dictionary) -> v
 	var reason = "identity_failed"
 	if accepted:
 		accepted = _register_remote_connection(peer_key, transport, peer)
-		reason = "room_full"
-	var welcome = {"msg_type": "transport_welcome", "accepted": accepted, "protocol_version": LAN_PROTOCOL_VERSION, "mod_version": NETWORK_PROTOCOL_VERSION, "session_id": _get_wire_session_id(), "assigned_peer_key": peer_key if accepted else "", "host_peer_key": _self_steam_id, "member_count": get_session_member_count(), "member_limit": MAX_LOBBY_MEMBERS, "state": get_lobby_state(), "reason": "" if accepted else reason}
+		reason = _remote_connection_rejection_reason(peer_key, transport, peer) if not accepted else ""
+	var welcome = {"msg_type": "transport_welcome", "accepted": accepted, "identity_refresh": authenticated_existing, "protocol_version": LAN_PROTOCOL_VERSION, "mod_version": NETWORK_PROTOCOL_VERSION, "session_id": _get_wire_session_id(), "assigned_peer_key": peer_key if accepted else "", "host_peer_key": _self_steam_id, "member_count": get_session_member_count(), "member_limit": MAX_LOBBY_MEMBERS, "state": get_lobby_state(), "reason": "" if accepted else reason}
 	# Tokens remain private to the initial LAN handshake. Do not log or broadcast.
 	transport.send_packet(peer, to_json(welcome).to_utf8(), P2P_CHANNEL_MENU, true)
 	if not accepted:
-		transport.close_peer(peer)
+		# ENet must deliver the reliable refusal before disconnecting, otherwise
+		# clients only see a transport loss and repeatedly reconnect without a reason.
+		transport.close_peer(peer, false)
 	else:
 		_sync_host_coop_slots_from_lobby()
 		_publish_session_metadata()
@@ -657,6 +656,9 @@ func _handle_transport_identity(transport: Node, peer, message: Dictionary) -> v
 func _challenge_lan_identity(peer, run_id: String) -> void:
 	var lookup = _connection_lookup_key(_lan_transport, peer)
 	_lan_identity_challenges[lookup] = {"run_id": run_id, "peer": peer, "existing_owner": str(_peer_key_by_connection.get(lookup, ""))}
+	# v1/v2 clients understand welcome but not the v3 negotiation marker. They
+	# reject its version before reading the (not yet assigned) connection fields.
+	_lan_transport.send_packet(peer, to_json({"msg_type": "transport_welcome", "accepted": true, "identity_required": true, "protocol_version": LAN_PROTOCOL_VERSION, "mod_version": NETWORK_PROTOCOL_VERSION}).to_utf8(), P2P_CHANNEL_MENU, true)
 	_lan_transport.send_packet(peer, to_json({"msg_type": "transport_identity_request", "run_id": run_id, "protocol_version": LAN_PROTOCOL_VERSION, "mod_version": NETWORK_PROTOCOL_VERSION}).to_utf8(), P2P_CHANNEL_MENU, true)
 
 
@@ -677,22 +679,26 @@ func refresh_lan_identities_for_run(run_id: String) -> void:
 func _handle_transport_welcome(transport: Node, peer, welcome: Dictionary) -> void:
 	if transport != _lan_transport or _is_game_host():
 		return
-	if not bool(welcome.get("accepted", false)):
-		_pending_lan_join = false
-		transport.stop()
-		_show_join_failure(_ui_text("identity_failed") if str(welcome.get("reason", "")) == "identity_failed" else _ui_text("join_failed_room_full"))
-		return
 	if int(welcome.get("protocol_version", 0)) != LAN_PROTOCOL_VERSION or str(welcome.get("mod_version", "")) != NETWORK_PROTOCOL_VERSION:
-		_pending_lan_join = false
-		transport.stop()
-		_show_join_failure(_ui_text("join_failed_protocol_mismatch"))
+		_fail_lan_handshake(transport, "join_failed_protocol_mismatch")
+		return
+	if not bool(welcome.get("accepted", false)):
+		var reason = str(welcome.get("reason", "room_full"))
+		var error_key = "join_failed_room_full"
+		if reason in ["identity_failed", "duplicate_identity", "resume_reassignment_required"]:
+			error_key = reason
+		_fail_lan_handshake(transport, error_key)
+		return
+	if bool(welcome.get("identity_required", false)):
+		return # Only the later, authenticated welcome completes the join.
+	if bool(welcome.get("identity_refresh", false)) and _session_active and _online_role == "client" and str(welcome.get("assigned_peer_key", "")) == _self_steam_id and str(welcome.get("session_id", "")) == _session_id and str(welcome.get("host_peer_key", "")) == _game_host_steam_id:
+		return # Rotating a run credential must not restart the joined client's flow.
+	if str(welcome.get("session_id", "")) == "" or str(welcome.get("assigned_peer_key", "")) == "" or str(welcome.get("host_peer_key", "")) == "":
+		_fail_lan_handshake(transport, "identity_failed")
 		return
 	_session_id = str(welcome.get("session_id", ""))
 	_self_steam_id = str(welcome.get("assigned_peer_key", ""))
 	_game_host_steam_id = str(welcome.get("host_peer_key", ""))
-	if _session_id == "" or _self_steam_id == "" or _game_host_steam_id == "":
-		transport.stop()
-		return
 	_session_active = true
 	_pending_lan_join = false
 	_online_role = "client"
@@ -711,6 +717,19 @@ func _handle_transport_welcome(transport: Node, peer, welcome: Dictionary) -> vo
 	_update_online_session_runtime_flag()
 	_start_client_hello_retry()
 	_send_client_hello_to_host()
+
+
+func _fail_lan_handshake(transport: Node, error_key: String) -> void:
+	if _session_active:
+		leave_lobby()
+	else:
+		_pending_lan_join = false
+		_online_role = "none"
+		_client_join_request_started_msec = 0
+		_peer_key_by_connection.clear()
+		transport.stop()
+		_update_online_session_runtime_flag()
+	_show_join_failure(_ui_text(error_key))
 
 
 func _handle_transport_session_id(transport: Node, message: Dictionary) -> void:
@@ -747,36 +766,38 @@ func _broadcast_transport_session_id() -> void:
 		_lan_transport.send_packet(connection.get("peer", null), payload, P2P_CHANNEL_MENU, true)
 
 
-func _register_remote_connection(peer_key: String, transport: Node, peer) -> bool:
+func _remote_connection_rejection_reason(peer_key: String, transport: Node, peer) -> String:
 	if _kicked_departing_peer_keys.has(peer_key):
-		return false
+		return "room_full"
 	if peer_key == "" or peer_key == _self_steam_id:
-		return false
-	_rejected_peer_keys.erase(peer_key)
+		return "duplicate_identity"
 	if _connection_by_peer_key.has(peer_key):
 		var existing = _connection_by_peer_key[peer_key]
 		if existing.get("transport", null) != transport or existing.get("peer", null) != peer:
-			# Duplicate live identities must not silently steal an existing connection.
-			return false
-		_connection_by_peer_key[peer_key] = {"transport": transport, "peer": peer, "peer_key": peer_key}
-		_peer_key_by_connection[_connection_lookup_key(transport, peer)] = peer_key
-		_refresh_player_connection(peer_key)
-		return true
-
+			return "duplicate_identity"
+		return ""
 	var identity = _get_identity_manager()
 	if identity != null and not identity.can_admit_peer(peer_key):
+		return "resume_reassignment_required"
+	if not _session_remote_peer_keys.has(peer_key) and (_should_freeze_online_run_slots() or get_session_member_count() >= MAX_LOBBY_MEMBERS):
+		return "room_full"
+	return ""
+
+
+func _register_remote_connection(peer_key: String, transport: Node, peer) -> bool:
+	var reason = _remote_connection_rejection_reason(peer_key, transport, peer)
+	if reason != "":
+		# Reject a second connection without poisoning the live owner's admission.
+		if reason == "duplicate_identity":
+			return false
 		_rejected_peer_keys[peer_key] = true
-		return false
-	# Only the same stable owner can reconnect to a reserved slot. Never consume
-	# the first disconnected player's slot for an unrelated/new connection.
-	if _session_remote_peer_keys.has(peer_key):
-		pass
-	elif _should_freeze_online_run_slots() or get_session_member_count() >= MAX_LOBBY_MEMBERS:
-		_rejected_peer_keys[peer_key] = true
-		if transport != null and transport.has_method("close_peer"):
+		if reason == "room_full" and transport != null and transport != _lan_transport and transport.has_method("close_peer"):
 			transport.close_peer(peer)
 		return false
-	else:
+	_rejected_peer_keys.erase(peer_key)
+	# Only the same stable owner can reconnect to a reserved slot. Never consume
+	# the first disconnected player's slot for an unrelated/new connection.
+	if not _session_remote_peer_keys.has(peer_key):
 		_session_remote_peer_keys.append(peer_key)
 
 	_connection_by_peer_key[peer_key] = {"transport": transport, "peer": peer, "peer_key": peer_key}
@@ -784,6 +805,13 @@ func _register_remote_connection(peer_key: String, transport: Node, peer) -> boo
 	_remember_host_remote_id(peer_key)
 	_refresh_player_connection(peer_key)
 	return true
+
+
+func refresh_resume_candidates() -> void:
+	if _session_active and _is_game_host():
+		# Includes members rejected before the host opened reassignment, even if
+		# the Steam member list has not changed since their initial admission.
+		_refresh_lobby_members()
 
 
 func _get_identity_manager():
@@ -800,6 +828,7 @@ func commit_resume_peer_order(layout: Array) -> void:
 	for key in _connection_by_peer_key.keys():
 		if not ordered.has(str(key)):
 			var connection = _connection_by_peer_key[key]
+			_drop_pending_p2p_sends_for_target(str(key))
 			_peer_key_by_connection.erase(_connection_lookup_key(connection.transport, connection.peer))
 			_connection_by_peer_key.erase(key)
 			if connection.transport.has_method("close_peer"):
@@ -1307,18 +1336,7 @@ func create_session(open_steam_overlay: bool = false) -> void:
 		steam_ok = true
 
 	if not lan_ok and not steam_ok:
-		_session_active = false
-		_session_id = ""
-		_online_role = "none"
-		_game_host_steam_id = ""
-		_lobby_toggle_pending_create = false
-		_last_lobby_create_failed_result = -2
-		_update_online_session_runtime_flag()
-		_update_lobby_toggle_button_state()
-		_update_character_invite_button_state()
-		_update_continue_invite_button_state()
-		_update_character_lobby_status_label_state()
-		_update_continue_lobby_status_label_state()
+		_handle_host_session_creation_failed(-2)
 		return
 
 	_lobby_toggle_pending_create = steam_ok
@@ -1877,10 +1895,36 @@ func _connect_signal_if_exists(signal_name: String, method_name: String) -> void
 	var err = _steam.connect(signal_name, self, method_name)
 
 
-func _on_lobby_created(connect_result = 0, lobby_id = 0) -> void:
+func _handle_host_session_creation_failed(result: int) -> void:
+	leave_lobby()
+	_last_lobby_create_failed_result = result
+	if _is_host_in_official_coop_continue_resume_scene():
+		# Keep failure recovery explicit; polling must not immediately reopen a
+		# failed room while the host chooses retry or vanilla local continuation.
+		_official_continue_auto_lobby_done_for_scene_id = get_tree().current_scene.get_instance_id()
+		var identity = _get_identity_manager()
+		if identity != null:
+			identity.show_resume_session_failure()
+	_update_lobby_toggle_button_state()
+	_update_character_invite_button_state()
+	_update_continue_invite_button_state()
+	_update_character_lobby_status_label_state()
+	_update_continue_lobby_status_label_state()
+	_update_online_session_runtime_flag()
 
+
+func _on_lobby_created(connect_result = 0, lobby_id = 0) -> void:
+	if not _lobby_toggle_pending_create:
+		# A host may choose local continuation or leave while Steam is creating
+		# the room. Dispose of its late result without reactivating that session.
+		if int(connect_result) == 1 and lobby_id != 0 and str(lobby_id) != str(_lobby_id) and _steam_has_method("leaveLobby"):
+			_steam.leaveLobby(lobby_id)
+		return
 	_lobby_toggle_pending_create = false
 	if int(connect_result) != 1:
+		if _lan_transport == null or not _lan_transport.is_hosting():
+			_handle_host_session_creation_failed(int(connect_result))
+			return
 		_lobby_toggle_close_after_create = false
 		_open_invite_overlay_after_create = false
 		_last_lobby_create_failed_result = int(connect_result)
@@ -2031,13 +2075,16 @@ func _clear_pending_join_request() -> void:
 
 
 func _poll_join_request_timeout() -> void:
-	if _pending_join_lobby_id == 0 and _client_join_requested_lobby_id == 0:
+	if not _pending_lan_join and _pending_join_lobby_id == 0 and _client_join_requested_lobby_id == 0:
 		_client_join_request_started_msec = 0
 		return
 	if _client_join_request_started_msec == 0:
 		_client_join_request_started_msec = OS.get_ticks_msec()
 		return
 	if OS.get_ticks_msec() - _client_join_request_started_msec < LOBBY_JOIN_TIMEOUT_MSEC:
+		return
+	if _pending_lan_join:
+		_fail_lan_handshake(_lan_transport, "join_failed_timeout")
 		return
 	_clear_pending_join_request()
 	_show_join_failure(_ui_text("join_failed_timeout"))
@@ -9073,6 +9120,9 @@ func _ensure_character_selection_coop_enabled() -> void:
 
 func _poll_official_continue_auto_lobby() -> void:
 	if not AUTO_CREATE_LOBBY_ON_OFFICIAL_COOP_CONTINUE:
+		return
+	var identity = _get_identity_manager()
+	if identity != null and identity.wants_offline_resume(get_tree().current_scene):
 		return
 	if _session_active or _lobby_toggle_pending_create or _online_role == "client":
 		_official_continue_auto_lobby_armed = false

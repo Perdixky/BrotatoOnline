@@ -17,6 +17,8 @@ var _candidates_key = ""
 var _poll_elapsed = 0.0
 var _last_selection_scene_id = 0
 var _last_status_mode = ""
+var _offline_resume = false
+var _legacy_save = false
 
 
 func _ready() -> void:
@@ -59,6 +61,7 @@ func _is_host() -> bool:
 
 func attach_resume_scene(scene: Node) -> void:
 	_resume_scene = scene
+	_offline_resume = false
 	_prepared_scene_id = 0
 	_pending = true
 	_manual = false
@@ -71,11 +74,15 @@ func attach_resume_scene(scene: Node) -> void:
 
 func guards_resume(scene: Node) -> bool:
 	var session = _session()
-	return scene == _resume_scene and session != null and (session.AUTO_CREATE_LOBBY_ON_OFFICIAL_COOP_CONTINUE or _is_host())
+	return scene == _resume_scene and not _offline_resume and session != null and (session.AUTO_CREATE_LOBBY_ON_OFFICIAL_COOP_CONTINUE or _is_host())
+
+
+func wants_offline_resume(scene: Node) -> bool:
+	return scene == _resume_scene and _offline_resume
 
 
 func prepare_resume_if_needed() -> bool:
-	if not _is_host() or not is_instance_valid(_resume_scene) or get_tree().current_scene != _resume_scene:
+	if _offline_resume or not _is_host() or not is_instance_valid(_resume_scene) or get_tree().current_scene != _resume_scene:
 		return false
 	if _prepared_scene_id != _resume_scene.get_instance_id():
 		_prepared_scene_id = _resume_scene.get_instance_id()
@@ -83,12 +90,14 @@ func prepare_resume_if_needed() -> bool:
 		registry = Registry.new()
 		_lan_hashes.clear()
 		_manual = not registry.load_metadata(ProgressData.saved_run_state.get(Registry.SAVE_KEY, {}), RunData.get_player_count())
+		_legacy_save = _manual
 		if registry.run_id == "":
 			registry.run_id = Registry.random_id()
 		for slot in registry.slots:
 			if str(slot.resume_hash) != "":
 				_lan_hashes[str(slot.owner_id)] = str(slot.resume_hash)
 		_pending = true
+		_clear_panel()
 		_build_panel()
 	return _pending
 
@@ -150,6 +159,10 @@ func reset_online_session_state() -> void:
 	_lan_hashes.clear()
 	_prepared_scene_id = 0
 	_pending = false
+	_clear_panel()
+
+
+func _clear_panel() -> void:
 	if is_instance_valid(_panel):
 		_panel.get_parent().queue_free()
 	_panel = null
@@ -157,6 +170,37 @@ func reset_online_session_state() -> void:
 	_choices.clear()
 	_candidates_key = ""
 	_last_status_mode = ""
+
+
+func show_resume_session_failure() -> void:
+	if not is_instance_valid(_resume_scene) or get_tree().current_scene != _resume_scene or _offline_resume:
+		return
+	_clear_panel()
+	var box = _create_panel_box()
+	_status.text = _text("BROTATO_ONLINE_IDENTITY_SESSION_FAILED")
+	var retry = Button.new()
+	retry.text = _text("BROTATO_ONLINE_IDENTITY_RETRY")
+	retry.connect("pressed", self, "_retry_session")
+	box.add_child(retry)
+	_add_offline_button(box)
+
+
+func _retry_session() -> void:
+	_clear_panel()
+	_session().create_lobby_and_invite(false)
+
+
+func _continue_offline() -> void:
+	_session().leave_lobby()
+	_offline_resume = true
+	_resume_scene.identity_resume_offline()
+
+
+func _add_offline_button(box: Node) -> void:
+	var button = Button.new()
+	button.text = _text("BROTATO_ONLINE_IDENTITY_OFFLINE")
+	button.connect("pressed", self, "_continue_offline")
+	box.add_child(button)
 
 
 func _process(delta: float) -> void:
@@ -234,7 +278,7 @@ func compact_slots(kept: Array) -> void:
 			state[Registry.SAVE_KEY] = registry.metadata()
 
 
-func _build_panel() -> void:
+func _create_panel_box():
 	var canvas = CanvasLayer.new()
 	canvas.layer = 90
 	_resume_scene.add_child(canvas)
@@ -263,6 +307,11 @@ func _build_panel() -> void:
 	_status.autowrap = true
 	_status.rect_min_size = Vector2(550, 65)
 	box.add_child(_status)
+	return box
+
+
+func _build_panel() -> void:
+	var box = _create_panel_box()
 	for index in range(RunData.get_player_count()):
 		var row = HBoxContainer.new()
 		box.add_child(row)
@@ -290,6 +339,7 @@ func _build_panel() -> void:
 	confirm.connect("pressed", self, "_confirm_assignment")
 	box.add_child(confirm)
 	confirm.name = "ConfirmIdentity"
+	_add_offline_button(box)
 
 
 func _text(key: String) -> String:
@@ -354,16 +404,23 @@ func _update_panel() -> void:
 	var mode = "manual" if _manual else "waiting"
 	if mode != _last_status_mode:
 		_last_status_mode = mode
-		_status.text = _text("BROTATO_ONLINE_IDENTITY_LEGACY") if _manual else _text("BROTATO_ONLINE_IDENTITY_WAITING")
+		_status.text = _text("BROTATO_ONLINE_IDENTITY_LEGACY" if _legacy_save else "BROTATO_ONLINE_IDENTITY_ASSIGN_HINT") if _manual else _text("BROTATO_ONLINE_IDENTITY_WAITING")
 
 
 func _open_assignment() -> void:
 	_manual = true
+	_session().refresh_resume_candidates()
 	_update_panel()
 
 
 func _confirm_assignment() -> void:
 	_try_commit(true)
+
+
+func _resume_problem(key: String, values: Array = []) -> void:
+	if is_instance_valid(_status):
+		var text = _text(key)
+		_status.text = text % values if not values.empty() and text.find("%s") >= 0 else text
 
 
 func _try_commit(manual: bool) -> void:
@@ -377,10 +434,15 @@ func _try_commit(manual: bool) -> void:
 	else:
 		owners = registry.slots.duplicate(true)
 	if owners.size() != RunData.get_player_count():
+		_resume_problem("BROTATO_ONLINE_IDENTITY_INVALID")
 		return
 	var seen = []
 	var layout = []
 	var host = _session().get_self_steam_id()
+	if not owners.empty() and str(owners[0].owner_id) != host:
+		_resume_problem("BROTATO_ONLINE_IDENTITY_HOST_CHANGED")
+		return
+	var required_locals = 0
 	for owner in owners:
 		var key = str(owner.owner_id)
 		var local_slot = int(owner.local_slot)
@@ -389,19 +451,29 @@ func _try_commit(manual: bool) -> void:
 			_status.text = _text("BROTATO_ONLINE_IDENTITY_INVALID")
 			return
 		seen.append(unique_key)
+		if key == host:
+			required_locals += 1
+		elif not manual and key.begins_with("lan:") and str(owner.get("resume_hash", "")) == "":
+			_resume_problem("BROTATO_ONLINE_IDENTITY_PROOF_MISSING")
+			return
 		if key != host and (local_slot != 0 or not _session()._connection_by_peer_key.has(key)):
+			_resume_problem("BROTATO_ONLINE_IDENTITY_NOT_CONNECTED", [_session().get_peer_display_name(key)])
 			return
 		if key != host and not _session()._seen_client_hello_by_steam_id.has(key):
 			# Steam lobby membership alone does not mean the mod client is ready.
+			_resume_problem("BROTATO_ONLINE_IDENTITY_HANDSHAKE", [_session().get_peer_display_name(key)])
 			return
 		layout.append({"peer_key": "" if key == host else key, "local_slot": local_slot})
 	# Host P0 is a vanilla invariant throughout this mod (camera, shops, menus).
 	if layout.empty() or str(layout[0].peer_key) != "" or int(layout[0].local_slot) != 0:
 		_status.text = _text("BROTATO_ONLINE_IDENTITY_HOST_FIRST")
 		return
+	var local_count = _slots().get_local_player_indices().size()
+	if required_locals != local_count:
+		_resume_problem("BROTATO_ONLINE_IDENTITY_LOCAL_COUNT", [required_locals, local_count])
+		return
 	if not _slots().apply_resume_identity_layout(layout):
-		if manual:
-			_status.text = _text("BROTATO_ONLINE_IDENTITY_INVALID")
+		_resume_problem("BROTATO_ONLINE_IDENTITY_INVALID")
 		return
 	registry.assign(owners, _lan_hashes)
 	_pending = false

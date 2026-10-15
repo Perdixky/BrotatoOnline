@@ -54,13 +54,24 @@ def main():
             "_on_transport_packet_received", "_handle_transport_identity",
             "_challenge_lan_identity", "refresh_lan_identities_for_run",
             "_official_continue_players_ready",
+            "_remote_connection_rejection_reason", "refresh_resume_candidates",
+            "_handle_transport_welcome", "_fail_lan_handshake",
+            "_drop_pending_p2p_sends_for_target", "_refresh_lobby_members",
+            "leave_lobby", "_poll_official_continue_auto_lobby",
+            "_is_host_in_official_coop_continue_resume_scene",
+            "_can_create_lobby_from_current_scene", "create_session",
+            "create_lobby_and_invite", "_handle_host_session_creation_failed",
+            "_poll_join_request_timeout", "_on_lobby_created",
         ])
+        session_functions = session_functions.replace(
+            "func _handle_transport_welcome(", "func _apply_transport_welcome(")
         with (project / "session.gd").open("a", encoding="utf-8") as out:
             out.write("\n" + session_functions)
         slot_functions = functions(ROOT / "scripts/online_player_slot_manager.gd", [
             "apply_resume_identity_layout", "_get_next_remote_placeholder_device_from_lists",
             "get_local_player_indices", "is_remote_player_index", "get_remote_steam_id",
             "get_player_index_for_steam_id",
+            "online_reset_to_offline",
         ])
         with (project / "slots.gd").open("a", encoding="utf-8") as out:
             out.write("\n" + slot_functions)
@@ -113,8 +124,13 @@ quality/driver/driver_name="GLES2"
         command = [str(engine), "--no-window", "--path", str(project)]
         if len(sys.argv) == 4 and sys.argv[2] == "--preview":
             command += ["--", "--preview", str(Path(sys.argv[3]).resolve())]
-        result = subprocess.run(command,
-                                capture_output=True, text=True, timeout=45)
+        try:
+            result = subprocess.run(command,
+                                    capture_output=True, text=True, timeout=45)
+        except subprocess.TimeoutExpired as error:
+            for captured in [error.stdout, error.stderr]:
+                print(captured.decode(errors="replace") if isinstance(captured, bytes) else captured or "", end="")
+            raise
         output = result.stdout + result.stderr
         print(output, end="")
         marker = "IDENTITY TESTS PASSED" if len(sys.argv) == 2 else "IDENTITY UI PREVIEW SAVED"

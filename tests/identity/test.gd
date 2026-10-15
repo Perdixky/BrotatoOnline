@@ -10,6 +10,7 @@ var identity = null
 var transport = null
 
 func _ready():
+	get_tree().create_timer(15).connect("timeout", get_tree(), "quit", [1])
 	call_deferred("_run")
 
 func check(value: bool, message: String):
@@ -58,7 +59,12 @@ func _run():
 	_test_checkpoint_filter()
 	_test_handshake_readiness()
 	_test_new_run_credentials()
+	_test_resume_recovery()
+	_test_resume_feedback()
+	_test_lan_failure_and_refresh()
+	_test_delayed_rotation_checkpoint()
 	yield(_test_loopback_transport(), "completed")
+	yield(_test_loopback_refusal(), "completed")
 	if failures == 0:
 		print("IDENTITY TESTS PASSED: ", checks, " checks")
 	else:
@@ -129,6 +135,18 @@ func _reset():
 	identity.reset_online_session_state()
 	session._session_active = true
 	session._online_role = "host"
+	session._self_steam_id = "1"
+	session._steam = null
+	session._steam_transport = null
+	session._lobby_id = 0
+	session._pending_lan_join = false
+	session._pending_join_lobby_id = 0
+	session._client_join_requested_lobby_id = 0
+	session._rejected_peer_keys.clear()
+	session._pending_p2p_chunk_sends.clear()
+	session._official_continue_auto_lobby_done_for_scene_id = 0
+	session._official_continue_auto_lobby_armed = false
+	session.failures.clear()
 	session.frozen = false
 	session._connection_by_peer_key.clear()
 	session._peer_key_by_connection.clear()
@@ -141,12 +159,16 @@ func _reset():
 	slots._device_by_remote_steam_id.clear()
 	slots._remote_devices.clear()
 	CoopService.connected_players = [[7, 0]]
+	slots._host_player_joined_by_manager = true
 	RunData.players_data = ["gear1", "gear2", "gear3", "gear4"]
 	RunData.start_wave_state = {}
 	ProgressData.saved_run_state = {"has_run_state": true, "players_data": RunData.players_data.duplicate(), "shop_items": ["shop1", "shop2", "shop3", "shop4"]}
 	ProgressData.last_saved_run_state = ProgressData.saved_run_state.duplicate(true)
 	transport.closed.clear()
 	transport.packets.clear()
+	transport.host_result = OK
+	transport.available = false
+	transport.hosting = false
 	session.welcomes.clear()
 
 func _resume(metadata: Dictionary):
@@ -250,7 +272,7 @@ func _test_lan():
 	session._on_transport_peer_connected(transport, 100)
 	var request = transport.packets.back().message
 	check(request.msg_type == "transport_identity_request" and request.run_id == registry.run_id, "LAN connection challenged for saved run")
-	var reply = {"msg_type": "transport_identity", "installation_id": install, "resume_token": token, "run_id": registry.run_id, "protocol_version": 2}
+	var reply = {"msg_type": "transport_identity", "installation_id": install, "resume_token": token, "run_id": registry.run_id, "protocol_version": 3}
 	session._handle_transport_identity(transport, 100, reply)
 	check(session._connection_by_peer_key.has(owner), "verified LAN owner uses stable key")
 	session._on_transport_peer_disconnected(transport, 100)
@@ -260,7 +282,7 @@ func _test_lan():
 	session._online_role = "client"
 	session._pending_lan_join = false
 	transport.packets.clear()
-	session._handle_transport_identity(transport, 1, {"msg_type": "transport_identity_request", "run_id": registry.run_id, "protocol_version": 2, "mod_version": "4.0.0"})
+	session._handle_transport_identity(transport, 1, {"msg_type": "transport_identity_request", "run_id": registry.run_id, "protocol_version": 3, "mod_version": "4.0.0"})
 	check(not transport.packets.empty() and transport.packets.back().message.msg_type == "transport_identity", "automatic LAN reconnect answers challenge while already active")
 	session._online_role = "host"
 
@@ -336,7 +358,7 @@ func _test_new_run_credentials():
 	check(next_run != old_run, "same-room new run gets fresh run ID")
 	check(transport.packets.back().message.run_id == next_run, "existing LAN connection challenged for new run")
 	var new_token = Registry.random_id()
-	var reply = {"msg_type": "transport_identity", "installation_id": install, "resume_token": new_token, "run_id": next_run, "protocol_version": 2}
+	var reply = {"msg_type": "transport_identity", "installation_id": install, "resume_token": new_token, "run_id": next_run, "protocol_version": 3}
 	session._handle_transport_identity(transport, 50, reply)
 	check(identity._lan_hashes.get(owner, "") == new_token.sha256_text(), "existing authenticated connection rotates per-run proof")
 	check(session._session_remote_peer_keys == [owner], "credential rotation does not add or move a player")
@@ -423,3 +445,250 @@ func _bind_transport(endpoint: Node, target: Node):
 	endpoint.connect("peer_connected", target, "_on_transport_peer_connected")
 	endpoint.connect("peer_disconnected", target, "_on_transport_peer_disconnected")
 	endpoint.connect("packet_received", target, "_on_transport_packet_received")
+
+
+class TestSteam:
+	extends Node
+	var left_lobbies = []
+	func leaveLobby(lobby):
+		left_lobbies.append(lobby)
+	func getNumLobbyMembers(_lobby):
+		return 2
+	func getLobbyMemberByIndex(_lobby, index):
+		return "1" if index == 0 else "9"
+
+
+func _two_player_resume(owner="2"):
+	_reset()
+	RunData.players_data = ["gear1", "gear2"]
+	ProgressData.saved_run_state.players_data = RunData.players_data.duplicate()
+	var reg = Registry.new()
+	reg.assign(_owners(["1", owner]))
+	return _resume(reg.metadata())
+
+
+func _test_resume_recovery():
+	var scene = _two_player_resume()
+	session._steam = TestSteam.new()
+	session._steam_transport = transport
+	session._lobby_id = 42
+	session._refresh_lobby_members()
+	check(session._rejected_peer_keys.has("9"), "waiting mode rejects an early Steam newcomer")
+	var before = CoopService.connected_players.duplicate(true)
+	identity._open_assignment()
+	check(session._connection_by_peer_key.has("9"), "opening reassignment immediately registers existing Steam members")
+	check(CoopService.connected_players == before, "admitting a waiting member does not assign a saved character")
+	session._seen_client_hello_by_steam_id["9"] = true
+	identity._choices[1].select(2)
+	identity._confirm_assignment()
+	check(scene.finished and identity.registry.slots[1].owner_id == "9", "host can explicitly assign the replacement")
+	session._steam.free()
+	session._steam = null
+	session._steam_transport = null
+	session._lobby_id = 0
+
+	scene = _two_player_resume()
+	session._official_continue_auto_lobby_done_for_scene_id = scene.get_instance_id()
+	session.leave_lobby()
+	check(RunData.get_player_count() == 2 and RunData.players_data == ["gear1", "gear2"], "leaving Continue preserves every loaded character instead of resetting to SOLO")
+	check(session._official_continue_auto_lobby_done_for_scene_id == 0, "leaving clears the automatic creation scene marker")
+	session._poll_official_continue_auto_lobby()
+	session._official_continue_auto_lobby_first_seen_msec = OS.get_ticks_msec() - 301
+	session._poll_official_continue_auto_lobby()
+	check(session._session_active and transport.hosting, "leaving on Continue permits a new automatic LAN room")
+	identity.prepare_resume_if_needed()
+	check(is_instance_valid(identity._panel), "recreated session rebuilds ownership UI")
+
+	scene = _two_player_resume()
+	session._session_active = false
+	transport.host_result = ERR_CANT_CREATE
+	session.create_session()
+	check(not session._session_active and session._online_role == "none", "synchronous transport failures leave no phantom host session")
+	check(is_instance_valid(identity._panel) and identity._status.text == "BROTATO_ONLINE_IDENTITY_SESSION_FAILED", "creation failure offers an explicit recovery panel")
+	transport.host_result = OK
+	identity._retry_session()
+	identity.prepare_resume_if_needed()
+	check(session._session_active and identity.is_resume_pending(), "retry can rebuild the identity transaction")
+	identity._continue_offline()
+	check(not identity.guards_resume(scene) and not session._session_active, "local continuation releases the vanilla guard after teardown")
+	session._poll_official_continue_auto_lobby()
+	check(not session._session_active, "local continuation suppresses automatic rehosting")
+	var late_steam = TestSteam.new()
+	session._steam = late_steam
+	session._on_lobby_created(1, 99)
+	check(not session._session_active and late_steam.left_lobbies == [99], "late Steam creation result cannot reopen a room after local continuation")
+	session._steam = null
+	late_steam.free()
+	check(scene._players_to_join.empty() and not scene.finished, "offline queue accounts for already joined local P0")
+	CoopService.connected_players.append([6, 1])
+	CoopService.emit_signal("connected_players_updated", CoopService.connected_players)
+	check(scene.finished, "vanilla local join can complete after online failure")
+
+	scene = _two_player_resume()
+	session._session_active = false
+	transport.host_result = ERR_CANT_CREATE
+	var steam_transport = load("res://transport.gd").new()
+	steam_transport.available = true
+	mod.add_child(steam_transport)
+	session._steam_transport = steam_transport
+	session.create_session()
+	check(session._session_active and session._lobby_toggle_pending_create, "Steam creation may still be pending when LAN bind fails")
+	session._on_lobby_created(15, 0)
+	check(not session._session_active and is_instance_valid(identity._panel), "asynchronous Steam failure also offers local recovery when LAN is unavailable")
+	steam_transport.free()
+	session._steam_transport = null
+
+	scene = _two_player_resume()
+	transport.hosting = true
+	session._lobby_toggle_pending_create = true
+	session._on_lobby_created(2, 0)
+	check(session._session_active and transport.hosting, "Steam failure preserves a healthy LAN room")
+
+
+func _test_resume_feedback():
+	var scene = _two_player_resume()
+	session._register_remote_connection("2", transport, 20)
+	identity._update_panel()
+	identity._try_commit(false)
+	check(identity._status.text.begins_with("BROTATO_ONLINE_IDENTITY_HANDSHAKE"), "automatic wait identifies the unfinished handshake")
+	identity._open_assignment()
+	identity._confirm_assignment()
+	check(identity._status.text.begins_with("BROTATO_ONLINE_IDENTITY_HANDSHAKE") and not scene.finished, "manual confirm explains missing hello")
+	session._seen_client_hello_by_steam_id["2"] = true
+	CoopService.connected_players.append([6, 1])
+	identity._confirm_assignment()
+	check(identity._status.text.begins_with("BROTATO_ONLINE_IDENTITY_LOCAL_COUNT"), "extra joined local input reports required and actual counts")
+	CoopService.connected_players.pop_back()
+	session._on_transport_peer_disconnected(transport, 20)
+	identity._confirm_assignment()
+	check(identity._status.text.begins_with("BROTATO_ONLINE_IDENTITY_NOT_CONNECTED"), "manual confirm explains a player who disconnected after selection")
+
+	scene = _two_player_resume()
+	session._self_steam_id = identity.installation_peer_key()
+	identity._try_commit(false)
+	check(identity._status.text == "BROTATO_ONLINE_IDENTITY_HOST_CHANGED", "host identity change points to explicit recovery")
+
+	var owner = "lan:" + Registry.random_id()
+	scene = _two_player_resume(owner)
+	identity._try_commit(false)
+	check(identity._status.text == "BROTATO_ONLINE_IDENTITY_PROOF_MISSING", "missing saved proof points to reassignment")
+
+	scene = _two_player_resume()
+	session._register_remote_connection("2", transport, 20)
+	session._register_remote_connection("9", transport, 90)
+	identity._open_assignment()
+	session._register_remote_connection("9", transport, 90)
+	session._pending_p2p_chunk_sends = [{"target_steam_id": "9"}, {"target_steam_id": "2"}]
+	session.commit_resume_peer_order([{"peer_key": "", "local_slot": 0}, {"peer_key": "2", "local_slot": 0}])
+	check(session._pending_p2p_chunk_sends.size() == 1 and session._pending_p2p_chunk_sends[0].target_steam_id == "2", "unassigned peers lose their queued messages before disconnect")
+
+
+func _test_lan_failure_and_refresh():
+	_two_player_resume()
+	var install = Registry.random_id()
+	var owner = "lan:" + install
+	var token = Registry.random_id()
+	session._on_transport_peer_connected(transport, 90)
+	var probe = transport.packets[0].message
+	check(probe.msg_type == "transport_welcome" and probe.accepted and probe.protocol_version != 1 and probe.protocol_version != 2, "legacy-readable welcome reaches old clients' version check")
+	check(probe.identity_required, "negotiation welcome cannot complete a current client join")
+	session._handle_transport_identity(transport, 90, {"msg_type": "transport_identity", "run_id": identity.registry.run_id, "installation_id": install, "resume_token": token, "protocol_version": 3})
+	check(transport.packets.back().message.reason == "resume_reassignment_required", "early LAN newcomer receives actionable refusal instead of room full")
+	identity._open_assignment()
+	session._on_transport_peer_connected(transport, 91)
+	session._handle_transport_identity(transport, 91, {"msg_type": "transport_identity", "run_id": identity.registry.run_id, "installation_id": install, "resume_token": token, "protocol_version": 3})
+	check(session._connection_by_peer_key.has(owner), "LAN newcomer can reconnect after reassignment opens")
+	session._on_transport_peer_connected(transport, 92)
+	session._handle_transport_identity(transport, 92, {"msg_type": "transport_identity", "run_id": identity.registry.run_id, "installation_id": install, "resume_token": token, "protocol_version": 3})
+	check(transport.packets.back().message.reason == "duplicate_identity" and session._connection_by_peer_key[owner].peer == 91, "duplicate LAN identity gets a distinct error and preserves its live connection")
+
+	_reset()
+	session._session_active = false
+	session._online_role = "client"
+	session._pending_lan_join = true
+	session._client_join_request_started_msec = OS.get_ticks_msec() - 12001
+	session._poll_join_request_timeout()
+	check(not session._pending_lan_join and session._online_role == "none" and session.failures.back() == "join_failed_timeout", "LAN handshake has a bounded timeout and clears joining state")
+	session._online_role = "client"
+	session._pending_lan_join = true
+	session._handle_transport_identity(transport, 1, {"msg_type": "transport_identity_request", "run_id": "invalid", "protocol_version": 3, "mod_version": "4.0.0"})
+	check(not session._pending_lan_join and session._online_role == "none" and session.failures.back() == "identity_failed", "unusable identity credentials clear pending state")
+	session._online_role = "client"
+	session._pending_lan_join = true
+	session._handle_transport_welcome(transport, 1, {"accepted": false, "protocol_version": 1, "mod_version": "4.0.0"})
+	check(session.failures.back() == "join_failed_protocol_mismatch", "version mismatch takes precedence over generic rejection")
+	session._online_role = "client"
+	session._pending_lan_join = true
+	session._handle_transport_welcome(transport, 1, probe)
+	check(session._pending_lan_join and not session._session_active, "current client waits for authentication after negotiation")
+	var welcome = {"accepted": true, "protocol_version": 3, "mod_version": "4.0.0", "session_id": "test-session", "assigned_peer_key": owner, "host_peer_key": "1"}
+	session._handle_transport_welcome(transport, 1, welcome)
+	check(session._session_active and not session._pending_lan_join, "authenticated welcome completes initial join")
+	session._online_flow_started = true
+	session._online_flow_left_since_msec = 123
+	session._client_join_request_started_msec = 456
+	var hello_starts = session.hello_starts
+	welcome.identity_refresh = true
+	session._handle_transport_welcome(transport, 1, welcome)
+	check(session._online_flow_started and session._online_flow_left_since_msec == 123 and session._client_join_request_started_msec == 456 and session.hello_starts == hello_starts, "credential rotation preserves established flow and hello retry state")
+
+
+func _test_delayed_rotation_checkpoint():
+	_reset()
+	RunData.players_data = ["gear1", "gear2"]
+	ProgressData.saved_run_state.players_data = RunData.players_data.duplicate()
+	var install = Registry.random_id()
+	var owner = "lan:" + install
+	session._register_remote_connection(owner, transport, 50)
+	var selection = Control.new()
+	selection.filename = "res://ui/menus/character_selection.tscn"
+	root.add_child(selection)
+	get_tree().current_scene = selection
+	identity._reset_for_new_selection()
+	selection.filename = "res://ui/menus/shop/coop_shop.tscn"
+	CoopService.connected_players = [[7, 0], [8, 0]]
+	slots._remote_steam_id_by_device[8] = owner
+	slots._device_by_remote_steam_id[owner] = 8
+	slots._remote_devices.append(8)
+	ProgressData.saved_run_state = identity.attach_saved_identity(ProgressData.saved_run_state)
+	ProgressData.last_saved_run_state = ProgressData.saved_run_state.duplicate(true)
+	var token = Registry.random_id()
+	var before = ProgressData.saves
+	session._handle_transport_identity(transport, 50, {"msg_type": "transport_identity", "run_id": identity.registry.run_id, "installation_id": install, "resume_token": token, "protocol_version": 3})
+	check(ProgressData.saves == before + 1 and ProgressData.saved_run_state[Registry.SAVE_KEY].slots[1].resume_hash == token.sha256_text(), "delayed credential rotation repairs a checkpoint saved before the reply")
+
+
+func _test_loopback_refusal():
+	_two_player_resume()
+	var host_transport = load("res://scripts/lan_transport.gd").new()
+	mod.add_child(host_transport)
+	session._lan_transport = host_transport
+	_bind_transport(host_transport, session)
+	var group = Node.new()
+	root.add_child(group)
+	var client = load("res://session.gd").new()
+	client.name = "BrotatoOnlineSessionManager"
+	client._session_active = false
+	client._online_role = "client"
+	client._pending_lan_join = true
+	group.add_child(client)
+	var client_identity = load("res://scripts/player_identity_manager.gd").new()
+	client_identity.name = "BrotatoOnlinePlayerIdentityManager"
+	group.add_child(client_identity)
+	client_identity.set_process(false)
+	var client_transport = load("res://scripts/lan_transport.gd").new()
+	group.add_child(client_transport)
+	client._lan_transport = client_transport
+	_bind_transport(client_transport, client)
+	var port = 30000 + int(OS.get_ticks_usec() % 1000)
+	check(host_transport.start_host(port) == OK and client_transport.start_client("127.0.0.1", port) == OK, "refusal loopback starts")
+	var deadline = OS.get_ticks_msec() + 1500
+	while client.failures.empty() and OS.get_ticks_msec() < deadline:
+		yield(get_tree().create_timer(0.02), "timeout")
+	check(not client.failures.empty() and client.failures.back() == "resume_reassignment_required", "real ENet newcomer receives actionable refusal before disconnection")
+	check(not client._pending_lan_join and client._online_role == "none", "real refusal clears LAN joining state")
+	client_transport.stop()
+	host_transport.stop()
+	group.free()
+	host_transport.free()
+	session._lan_transport = transport

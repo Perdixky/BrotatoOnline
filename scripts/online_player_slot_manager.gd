@@ -400,6 +400,15 @@ func online_reset_to_offline(reason: String = "") -> void:
 	_remote_steam_id_by_device.clear()
 	_remote_devices.clear()
 
+	if _is_in_official_coop_resume_scene():
+		# Continue has already loaded every saved character. Leaving the room or
+		# falling back to local inputs must not apply selection's SOLO reset to it.
+		CoopService.listening_for_inputs = true
+		_last_observed_local_layout_key = _build_local_layout_key()
+		_bo_emit_connected_players_updated("offline_preserve_resume")
+		dump_slots()
+		return
+
 	if _is_in_active_online_run_scene():
 		# Do not shrink RunData during an active battle/shop; that can corrupt the run.
 		dump_slots()

@@ -41,7 +41,9 @@ New online checkpoints store each character's owner. Remote players may join in 
 - To replace a player, change computers, or switch between Steam and LAN, the host first opens **Reassign characters**, then admits and assigns the replacement. A new identity never automatically takes the first disconnected slot.
 - P1 remains host local player 1. Additional host local players can own other slots; join the required local inputs when resuming. Local ordinals follow their local join order.
 - LAN installation identity and private resume tokens live in `brotato_online_identity.cfg` in the game's user directory. Preserve it for automatic recognition, or use explicit host reassignment after moving a save to another computer.
-- The LAN handshake protocol is now version 2; update both host and clients. Steam messages retain protocol `4.0.0` and the existing authoritative slot-layout messages.
+- The LAN handshake protocol is now version 3; update both host and clients. Steam messages retain protocol `4.0.0` and the existing authoritative slot-layout messages.
+
+If room creation fails, retry or choose “Continue local co-op”. The ownership panel also offers local continuation; this closes the online session and restores the vanilla local input join flow. Waiting messages identify missing connections, handshakes, local player counts, or LAN resume proofs. Steam members are rechecked when reassignment opens; LAN newcomers rejected earlier must reconnect.
 
 ### Developer validation
 
@@ -51,7 +53,7 @@ Run with Godot 3.6 or a compatible Godot 3 engine:
 python tests/identity/run.py "C:/path/to/Godot_v3.6-stable_win64.exe"
 ```
 
-The harness uses a temporary project and isolated identity file, never real game saves. It covers all six remote join orders, missing/unready owners, simultaneous disconnects and reverse reconnection, duplicate identities, spoofed senders, legacy migration, mixed host local/remote slots, removal and retry checkpoints, and per-run credential rotation in an existing room. Real ENet loopback connections exercise disconnect/reconnect with changing peer IDs. Modified production scripts are also compiled by Godot.
+The harness uses a temporary project and isolated identity file, never real game saves. It covers all six remote join orders, missing/unready owners, simultaneous disconnects and reverse reconnection, duplicate identities, spoofed senders, legacy migration, mixed host local/remote slots, removal and retry checkpoints, and per-run credential rotation in an existing room. Recovery checks cover synchronous/asynchronous creation failures, local continuation without losing saved characters, late Steam creation callbacks, reassignment refresh, specific waiting reasons, LAN handshake timeout, and rotation without restarting the joined flow. Real ENet loopback connections exercise disconnect/reconnect with changing peer IDs and delivery of refusal reasons before disconnection. Modified production scripts are also compiled by Godot.
 
 For live acceptance, install the same build on multiple machines, save a run, quit, and rejoin in reverse order. Check each player's character, gear, currency, and locked shop items. Disconnect two clients together during battle/shop and reconnect in reverse order. Automated checks pass; full Steam multiplayer and actual loss/jitter conditions still require this live check.
 
