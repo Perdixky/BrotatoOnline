@@ -198,6 +198,10 @@ func filter_saved_state(state: Dictionary) -> Dictionary:
 		var value = state.get(key, null)
 		if typeof(value) == TYPE_ARRAY:
 			result[key] = _select_array(value, kept_positions, key != "players_data")
+	var identity_table = state.get("bo_player_identity", {})
+	if typeof(identity_table) == TYPE_DICTIONARY and typeof(identity_table.get("slots", null)) == TYPE_ARRAY and identity_table.slots.size() == players.size():
+		result["bo_player_identity"] = identity_table.duplicate(true)
+		result["bo_player_identity"]["slots"] = _select_array(identity_table.slots, kept_positions)
 	result["bo_roster_revision"] = revision
 	result["bo_roster_slots"] = kept_slots
 	return result
@@ -282,12 +286,17 @@ func _commit_host_removal(scene_id: int) -> void:
 		if typeof(value) == TYPE_ARRAY:
 			RunData.start_wave_state[key] = _select_array(value, kept, key != "players_data")
 	_slots().remove_online_player_slots(removed_indices)
+	var identity = get_parent().get_node_or_null("BrotatoOnlinePlayerIdentityManager")
+	if identity != null:
+		identity.compact_slots(kept)
 	revision += 1
 	_removed.clear()
 	_affects_saved_run = false
 	_reset_indexed_caches()
 	_trace("roster_compacted")
 	if not shop_save.empty():
+		if identity != null and not identity.registry.slots.empty():
+			shop_save["bo_player_identity"] = identity.registry.metadata()
 		shop_save["bo_roster_revision"] = revision
 		shop_save["bo_roster_slots"] = range(RunData.get_player_count())
 		ProgressData.saved_run_state = shop_save

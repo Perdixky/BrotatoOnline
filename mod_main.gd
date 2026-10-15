@@ -20,6 +20,7 @@ func _init() -> void:
 	_install_pause_menu_focus_safe_extension()
 	_install_utils_online_manual_aim_extension()
 	ModLoaderMod.install_script_extension(mod_dir_path.plus_file("extensions/progress_data_removed_players.gd"))
+	ModLoaderMod.install_script_extension(mod_dir_path.plus_file("extensions/coop_resume_player_identity.gd"))
 
 
 
@@ -130,6 +131,7 @@ func _ready() -> void:
 	_add_lan_discovery()
 	_add_lobby_browser()
 	_add_online_player_slot_manager()
+	_add_script_node("BrotatoOnlinePlayerIdentityManager", "scripts/player_identity_manager.gd", true)
 	_add_upgrade_runtime_sync()
 	_add_menu_sync_manager()
 	_add_quick_chat_wheel_manager()

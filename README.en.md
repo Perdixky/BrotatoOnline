@@ -33,6 +33,28 @@ LAN sessions can be used directly without Steam lobby discovery.
 
 > Steam public lobbies and discovered LAN rooms appear in the same lobby browser.
 
+### Saved runs and reconnection
+
+New online checkpoints store each character's owner. Remote players may join in any order. Once the saved owners complete their handshake, the host restores input slots in saved character order, preserving character, gear, currency, and shop indices.
+
+- Older saves require a one-time assignment on the host's **Player ownership** page. Select a player for each character and confirm; subsequent resumes use the saved ownership.
+- To replace a player, change computers, or switch between Steam and LAN, the host first opens **Reassign characters**, then admits and assigns the replacement. A new identity never automatically takes the first disconnected slot.
+- P1 remains host local player 1. Additional host local players can own other slots; join the required local inputs when resuming. Local ordinals follow their local join order.
+- LAN installation identity and private resume tokens live in `brotato_online_identity.cfg` in the game's user directory. Preserve it for automatic recognition, or use explicit host reassignment after moving a save to another computer.
+- The LAN handshake protocol is now version 2; update both host and clients. Steam messages retain protocol `4.0.0` and the existing authoritative slot-layout messages.
+
+### Developer validation
+
+Run with Godot 3.6 or a compatible Godot 3 engine:
+
+```powershell
+python tests/identity/run.py "C:/path/to/Godot_v3.6-stable_win64.exe"
+```
+
+The harness uses a temporary project and isolated identity file, never real game saves. It covers all six remote join orders, missing/unready owners, simultaneous disconnects and reverse reconnection, duplicate identities, spoofed senders, legacy migration, mixed host local/remote slots, removal and retry checkpoints, and per-run credential rotation in an existing room. Real ENet loopback connections exercise disconnect/reconnect with changing peer IDs. Modified production scripts are also compiled by Godot.
+
+For live acceptance, install the same build on multiple machines, save a run, quit, and rejoin in reverse order. Check each player's character, gear, currency, and locked shop items. Disconnect two clients together during battle/shop and reconnect in reverse order. Automated checks pass; full Steam multiplayer and actual loss/jitter conditions still require this live check.
+
 ## Features
 
 ### Sessions and lobbies
