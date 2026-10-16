@@ -63,6 +63,7 @@ func _run():
 	_test_resume_feedback()
 	_test_lan_failure_and_refresh()
 	_test_delayed_rotation_checkpoint()
+	_test_review_regressions()
 	yield(_test_loopback_transport(), "completed")
 	yield(_test_loopback_refusal(), "completed")
 	if failures == 0:
@@ -172,12 +173,19 @@ func _reset():
 	session.welcomes.clear()
 
 func _resume(metadata: Dictionary):
+	var file = File.new()
+	file.open("res://run_v3_0.json", File.WRITE)
+	file.store_string(to_json(ProgressData.saved_run_state))
+	file.close()
+	var store = ConfigFile.new()
 	if not metadata.empty():
-		ProgressData.saved_run_state[Registry.SAVE_KEY] = metadata
-	var scene = load("res://resume.gd").new()
+		store.set_value("checkpoints", identity._checkpoint_key(), metadata)
+	store.save(identity.RUN_FILE)
+	var scene = load("res://resume_base.gd").new()
 	scene.filename = "res://ui/menus/shop/coop_resume.tscn"
 	root.add_child(scene)
 	get_tree().current_scene = scene
+	identity.bind_resume_scene(scene)
 	identity.prepare_resume_if_needed()
 	return scene
 
@@ -254,9 +262,9 @@ func _test_legacy():
 	for index in range(identity._choices.size()):
 		identity._choices[index].select(index + 1)
 	identity._confirm_assignment()
-	check(scene.finished and ProgressData.saved_run_state.has(Registry.SAVE_KEY), "host confirmation migrates old save")
+	check(scene.finished and not identity.load_saved_identity().empty() and not ProgressData.saved_run_state.has(Registry.SAVE_KEY), "host confirmation migrates old save")
 	var migrated = Registry.new()
-	check(migrated.load_metadata(ProgressData.saved_run_state[Registry.SAVE_KEY], 4), "migrated table valid on next resume")
+	check(migrated.load_metadata(identity.load_saved_identity(), 4), "migrated table valid on next resume")
 
 func _test_lan():
 	_reset()
@@ -282,7 +290,7 @@ func _test_lan():
 	session._online_role = "client"
 	session._pending_lan_join = false
 	transport.packets.clear()
-	session._handle_transport_identity(transport, 1, {"msg_type": "transport_identity_request", "run_id": registry.run_id, "protocol_version": 3, "mod_version": "4.0.0"})
+	session._handle_transport_identity(transport, 1, {"msg_type": "transport_identity_request", "run_id": registry.run_id, "protocol_version": 3, "mod_version": "5.0.0"})
 	check(not transport.packets.empty() and transport.packets.back().message.msg_type == "transport_identity", "automatic LAN reconnect answers challenge while already active")
 	session._online_role = "host"
 
@@ -292,7 +300,6 @@ func _test_transaction():
 	check(not slots.apply_resume_identity_layout([{"peer_key": "", "local_slot": 0}, {"peer_key": "2"}, {"peer_key": "2"}, {"peer_key": "3"}]), "duplicate layout rejected")
 	check(CoopService.connected_players == before and slots._device_by_remote_steam_id.empty(), "failed commit has no partial topology")
 	identity.registry.assign(_owners(["1", "2", "3", "4"]))
-	ProgressData.saved_run_state[Registry.SAVE_KEY] = identity.registry.metadata()
 	RunData.start_wave_state = ProgressData.saved_run_state.duplicate(true)
 	var old_slot_id = identity.registry.slots[2].slot_id
 	RunData.players_data = ["gear1", "gear3", "gear4"]
@@ -300,7 +307,7 @@ func _test_transaction():
 	RunData.start_wave_state.players_data = RunData.players_data.duplicate()
 	identity.compact_slots([0, 2, 3])
 	check(identity.registry.slots[1].slot_id == old_slot_id, "removal keeps durable slot identity")
-	check(RunData.start_wave_state[Registry.SAVE_KEY].slots.size() == 3, "retry cannot resurrect removed owner")
+	check(identity.registry.slots.size() == 3 and not RunData.start_wave_state.has(Registry.SAVE_KEY), "retry cannot resurrect removed owner")
 
 func _test_checkpoint_filter():
 	_reset()
@@ -310,18 +317,19 @@ func _test_checkpoint_filter():
 	removal._affects_saved_run = true
 	removal._removed = {1: "2"}
 	identity.registry.assign(_owners(["1", "2", "3", "4"]))
-	var state = identity.attach_saved_identity(ProgressData.saved_run_state.duplicate(true))
+	var state = ProgressData.saved_run_state.duplicate(true)
+	var metadata = identity._metadata_for_state(state)
 	var filtered = removal.filter_saved_state(state)
 	check(filtered.players_data == ["gear1", "gear3", "gear4"], "checkpoint removal filters character data")
-	check(filtered[Registry.SAVE_KEY].slots[1].owner_id == "3", "checkpoint removal filters ownership in same positions")
-	check(filtered[Registry.SAVE_KEY].slots[1].slot_id == state[Registry.SAVE_KEY].slots[2].slot_id, "checkpoint removal retains slot ID")
+	check(identity._metadata_for_state(filtered).slots[1].owner_id == "3", "checkpoint removal filters ownership in same positions")
+	check(identity._metadata_for_state(filtered).slots[1].slot_id == metadata.slots[2].slot_id, "checkpoint removal retains slot ID")
 	var again = removal.filter_saved_state(filtered)
-	check(again.players_data == filtered.players_data and again[Registry.SAVE_KEY].slots.size() == 3, "repeated checkpoint filtering is idempotent")
+	check(again.players_data == filtered.players_data and identity._metadata_for_state(again).slots.size() == 3 and not again.has(Registry.SAVE_KEY), "repeated checkpoint filtering is idempotent")
 	var freshly_filtered = ProgressData.saved_run_state.duplicate(true)
 	freshly_filtered.players_data = ["gear1", "gear3", "gear4"]
 	freshly_filtered.bo_roster_slots = [0, 2, 3]
-	freshly_filtered = identity.attach_saved_identity(freshly_filtered)
-	check(freshly_filtered[Registry.SAVE_KEY].slots[1].owner_id == "3", "fresh save metadata honors filtered indices")
+	var fresh_metadata = identity._metadata_for_state(freshly_filtered)
+	check(fresh_metadata.slots[1].owner_id == "3", "fresh save metadata honors filtered indices")
 	removal.free()
 
 func _test_handshake_readiness():
@@ -450,6 +458,9 @@ func _bind_transport(endpoint: Node, target: Node):
 class TestSteam:
 	extends Node
 	var left_lobbies = []
+	var version = "5.0.0"
+	func getLobbyData(_lobby, _key):
+		return version
 	func leaveLobby(lobby):
 		left_lobbies.append(lobby)
 	func getNumLobbyMembers(_lobby):
@@ -611,17 +622,17 @@ func _test_lan_failure_and_refresh():
 	check(not session._pending_lan_join and session._online_role == "none" and session.failures.back() == "join_failed_timeout", "LAN handshake has a bounded timeout and clears joining state")
 	session._online_role = "client"
 	session._pending_lan_join = true
-	session._handle_transport_identity(transport, 1, {"msg_type": "transport_identity_request", "run_id": "invalid", "protocol_version": 3, "mod_version": "4.0.0"})
+	session._handle_transport_identity(transport, 1, {"msg_type": "transport_identity_request", "run_id": "invalid", "protocol_version": 3, "mod_version": "5.0.0"})
 	check(not session._pending_lan_join and session._online_role == "none" and session.failures.back() == "identity_failed", "unusable identity credentials clear pending state")
 	session._online_role = "client"
 	session._pending_lan_join = true
-	session._handle_transport_welcome(transport, 1, {"accepted": false, "protocol_version": 1, "mod_version": "4.0.0"})
+	session._handle_transport_welcome(transport, 1, {"accepted": false, "protocol_version": 1, "mod_version": "5.0.0"})
 	check(session.failures.back() == "join_failed_protocol_mismatch", "version mismatch takes precedence over generic rejection")
 	session._online_role = "client"
 	session._pending_lan_join = true
 	session._handle_transport_welcome(transport, 1, probe)
 	check(session._pending_lan_join and not session._session_active, "current client waits for authentication after negotiation")
-	var welcome = {"accepted": true, "protocol_version": 3, "mod_version": "4.0.0", "session_id": "test-session", "assigned_peer_key": owner, "host_peer_key": "1"}
+	var welcome = {"accepted": true, "protocol_version": 3, "mod_version": "5.0.0", "session_id": "test-session", "assigned_peer_key": owner, "host_peer_key": "1"}
 	session._handle_transport_welcome(transport, 1, welcome)
 	check(session._session_active and not session._pending_lan_join, "authenticated welcome completes initial join")
 	session._online_flow_started = true
@@ -650,12 +661,68 @@ func _test_delayed_rotation_checkpoint():
 	slots._remote_steam_id_by_device[8] = owner
 	slots._device_by_remote_steam_id[owner] = 8
 	slots._remote_devices.append(8)
-	ProgressData.saved_run_state = identity.attach_saved_identity(ProgressData.saved_run_state)
+	identity.persist_saved_identity()
 	ProgressData.last_saved_run_state = ProgressData.saved_run_state.duplicate(true)
 	var token = Registry.random_id()
 	var before = ProgressData.saves
 	session._handle_transport_identity(transport, 50, {"msg_type": "transport_identity", "run_id": identity.registry.run_id, "installation_id": install, "resume_token": token, "protocol_version": 3})
-	check(ProgressData.saves == before + 1 and ProgressData.saved_run_state[Registry.SAVE_KEY].slots[1].resume_hash == token.sha256_text(), "delayed credential rotation repairs a checkpoint saved before the reply")
+	check(ProgressData.saves == before and identity.load_saved_identity().slots[1].resume_hash == token.sha256_text() and not ProgressData.saved_run_state.has(Registry.SAVE_KEY), "delayed credential rotation repairs a checkpoint saved before the reply")
+
+
+func _test_review_regressions():
+	_reset()
+	RunData.players_data = ["keyboard gear", "remote gear", "controller gear"]
+	ProgressData.saved_run_state.players_data = RunData.players_data.duplicate()
+	var registry = Registry.new()
+	registry.assign([{"owner_id": "1", "local_slot": 0}, {"owner_id": "2", "local_slot": 0}, {"owner_id": "1", "local_slot": 1}])
+	var scene = _resume(registry.metadata())
+	CoopService.connected_players.append([6, 1])
+	var bridge = identity._resume_bridge
+	identity.bind_resume_scene(scene)
+	check(identity._resume_bridge == bridge and scene.advance_count == 1, "deferred/removal binding is idempotent and cannot advance the vanilla queue")
+	var saved_bytes = File.new().get_sha256("res://run_v3_0.json")
+	identity._continue_offline()
+	check(identity._resume_bridge._waiting_slot == 1 and not scene.finished, "offline asks for missing P1, retaining local P2")
+	CoopService.connected_players.append([3, 1])
+	CoopService.emit_signal("connected_players_updated", CoopService.connected_players)
+	check(scene.finished and CoopService.connected_players == [[7, 0], [3, 1], [6, 1]], "offline restores nonadjacent local inputs to their saved characters")
+	check(RunData.players_data == ["keyboard gear", "remote gear", "controller gear"], "offline join does not reorder or resize saved character data")
+	check(File.new().get_sha256("res://run_v3_0.json") == saved_bytes, "offline fallback never rewrites the vanilla run file")
+
+	scene = _two_player_resume()
+	identity._pending = false
+	identity.persist_saved_identity()
+	var metadata = identity.load_saved_identity()
+	check(not metadata.empty() and not ProgressData.saved_run_state.has(Registry.SAVE_KEY), "ownership lives only in the mod sidecar")
+	ProgressData.SAVE_PATH = "res://save_v3_1.json"
+	check(identity.load_saved_identity().empty(), "a different profile cannot inherit the previous profile's owners")
+	ProgressData.SAVE_PATH = "res://save_v3_0.json"
+	var file = File.new()
+	file.open("res://run_v3_0.json", File.WRITE)
+	file.store_string("a different run with the same character count")
+	file.close()
+	check(identity.load_saved_identity().empty(), "replaced save bytes cannot reuse stale ownership")
+	var installed = Registry.random_id()
+	identity.registry.run_id = Registry.random_id()
+	identity.accept_lan_identity(installed, Registry.random_id(), true)
+	check(identity.load_saved_identity().empty(), "new-run credential reply cannot attach metadata to an older on-disk checkpoint")
+
+	for continuing in [false, true]:
+		if continuing:
+			_two_player_resume()
+		else:
+			_reset()
+		var steam = TestSteam.new()
+		session._steam = steam
+		steam.version = "4.0.0"
+		check(not session._is_lobby_protocol_compatible(42), "new client rejects old host, Continue=" + str(continuing))
+		steam.version = "5.0.0"
+		check(session._is_lobby_protocol_compatible(42), "current Steam host version accepted")
+		check(not session._accept_client_protocol("2", {"mod_version": "4.0.0"}) and session.kicked.has("2"), "new host rejects old client, Continue=" + str(continuing))
+		check(not session._seen_client_hello_by_steam_id.has("2"), "incompatible hello never counts as ready")
+		check(session._accept_client_protocol("3", {"mod_version": "5.0.0"}), "current client protocol accepted")
+		session._steam = null
+		steam.free()
 
 
 func _test_loopback_refusal():

@@ -1,7 +1,10 @@
 extends Node
 
 const Registry = preload("player_identity_registry.gd")
-const CLIENT_FILE = "user://brotato_online_identity.cfg"
+const STORAGE_DIR = "user://mod_data/six666-BrotatoOnline"
+const CLIENT_FILE = STORAGE_DIR + "/client_identity.cfg"
+const RUN_FILE = STORAGE_DIR + "/saved_identities.cfg"
+const ResumeBridge = preload("../extensions/coop_resume_player_identity.gd")
 var registry = Registry.new()
 var _credentials = ConfigFile.new()
 var _installation_id = ""
@@ -19,15 +22,33 @@ var _last_selection_scene_id = 0
 var _last_status_mode = ""
 var _offline_resume = false
 var _legacy_save = false
+var _resume_bridge = null
 
 
 func _ready() -> void:
-	_credentials.load(CLIENT_FILE)
+	Directory.new().make_dir_recursive(STORAGE_DIR)
+	if _credentials.load(CLIENT_FILE) != OK:
+		_credentials.load("user://brotato_online_identity.cfg")
 	_installation_id = str(_credentials.get_value("identity", "installation_id", ""))
 	if not Registry.is_random_id(_installation_id):
 		_installation_id = Registry.random_id()
 		_credentials.set_value("identity", "installation_id", _installation_id)
 		_credentials.save(CLIENT_FILE)
+	get_tree().connect("node_added", self, "_on_node_added")
+
+
+func _on_node_added(node: Node) -> void:
+	if str(node.filename).ends_with("/coop_resume.tscn"):
+		call_deferred("bind_resume_scene", node)
+
+
+func bind_resume_scene(scene: Node) -> void:
+	if not is_instance_valid(scene) or scene.has_node("BrotatoOnlineIdentityResume"):
+		return
+	_resume_bridge = ResumeBridge.new()
+	_resume_bridge.name = "BrotatoOnlineIdentityResume"
+	scene.add_child(_resume_bridge)
+	_resume_bridge.bind(scene, self)
 
 
 func installation_peer_key() -> String:
@@ -89,7 +110,7 @@ func prepare_resume_if_needed() -> bool:
 		_session()._unlock_online_run_slots()
 		registry = Registry.new()
 		_lan_hashes.clear()
-		_manual = not registry.load_metadata(ProgressData.saved_run_state.get(Registry.SAVE_KEY, {}), RunData.get_player_count())
+		_manual = not registry.load_metadata(load_saved_identity(), RunData.get_player_count())
 		_legacy_save = _manual
 		if registry.run_id == "":
 			registry.run_id = Registry.random_id()
@@ -128,14 +149,10 @@ func accept_lan_identity(installation_id: String, token: String, authenticated_e
 		for slot in registry.slots:
 			if str(slot.owner_id) == owner:
 				slot.resume_hash = str(_lan_hashes[owner])
-		var updated_checkpoint = false
-		for state in [ProgressData.saved_run_state, ProgressData.last_saved_run_state]:
-			var metadata = state.get(Registry.SAVE_KEY, {})
-			if str(metadata.get("run_id", "")) == registry.run_id and state.get("players_data", []).size() == registry.slots.size():
-				state[Registry.SAVE_KEY] = registry.metadata()
-				updated_checkpoint = true
-		if updated_checkpoint:
-			ProgressData.save()
+		# A late reply may repair an already-written checkpoint from this run,
+		# never overwrite the sidecar of the previous run still on disk.
+		if str(load_saved_identity().get("run_id", "")) == registry.run_id:
+			persist_saved_identity()
 		return true
 	if is_resume_pending() and not _manual and registry.index_for_owner(owner) >= 0:
 		# A saved LAN owner without a proof is never silently trusted.
@@ -191,9 +208,20 @@ func _retry_session() -> void:
 
 
 func _continue_offline() -> void:
+	# Capture the mapping before teardown removes remote placeholders and clears
+	# the registry. A host's second input can belong to P2 rather than P1.
+	var inputs = {}
+	var local_indices = _slots().get_local_player_indices()
+	var host = _session().get_self_steam_id()
+	for local_slot in range(local_indices.size()):
+		var saved_index = registry.index_for_owner(host, local_slot)
+		if saved_index < 0 and local_slot == 0:
+			saved_index = 0
+		if saved_index >= 0:
+			inputs[saved_index] = CoopService.connected_players[int(local_indices[local_slot])].duplicate()
 	_session().leave_lobby()
 	_offline_resume = true
-	_resume_scene.identity_resume_offline()
+	_resume_bridge.identity_resume_offline(inputs)
 
 
 func _add_offline_button(box: Node) -> void:
@@ -248,34 +276,61 @@ func _capture_current_owners() -> Array:
 	return owners
 
 
-func attach_saved_identity(state: Dictionary) -> Dictionary:
+func _metadata_for_state(state: Dictionary) -> Dictionary:
 	if not _is_host() or not bool(state.get("has_run_state", false)) or is_resume_pending():
-		return state
+		return {}
 	var player_count = RunData.get_player_count()
 	if registry.slots.empty():
 		var owners = _capture_current_owners()
 		if owners.size() != player_count:
-			return state
+			return {}
 		registry.assign(owners, _lan_hashes)
 	if registry.slots.size() != player_count:
-		return state
+		return {}
 	var indices = state.get("bo_roster_slots", [])
 	if state.get("players_data", []).size() == player_count:
 		indices = []
-	var metadata = registry.metadata(indices)
-	if not metadata.empty():
-		state[Registry.SAVE_KEY] = metadata
-	return state
+	return registry.metadata(indices)
+
+
+func _checkpoint_key() -> String:
+	# Bind metadata to the bytes actually written by the vanilla save loader,
+	# including the profile path. Copied/replaced runs cannot inherit stale owners.
+	var path = str(ProgressData.SAVE_PATH).replace("save_v3_", "run_v3_")
+	if not File.new().file_exists(path):
+		return ""
+	return path.sha256_text() + ":" + File.new().get_sha256(path)
+
+
+func load_saved_identity() -> Dictionary:
+	var store = ConfigFile.new()
+	if store.load(RUN_FILE) != OK:
+		return {}
+	var metadata = store.get_value("checkpoints", _checkpoint_key(), {})
+	return metadata if typeof(metadata) == TYPE_DICTIONARY else {}
+
+
+func persist_saved_identity() -> void:
+	var key = _checkpoint_key()
+	var metadata = _metadata_for_state(ProgressData.saved_run_state)
+	if key == "" or metadata.empty():
+		return
+	var store = ConfigFile.new()
+	store.load(RUN_FILE)
+	store.set_value("checkpoints", key, metadata)
+	# Retain recent checkpoint backups without growing the file indefinitely.
+	var keys = store.get_section_keys("checkpoints")
+	while keys.size() > 64:
+		store.erase_section_key("checkpoints", keys[0])
+		keys.remove(0)
+	if store.save(RUN_FILE) != OK:
+		push_error("BrotatoOnline: could not save player identities to " + RUN_FILE)
 
 
 func compact_slots(kept: Array) -> void:
 	if registry.slots.empty():
 		return
 	registry.compact(kept)
-	# Character/slot IDs survive index compaction, including the retry checkpoint.
-	for state in [ProgressData.saved_run_state, ProgressData.last_saved_run_state, RunData.start_wave_state]:
-		if typeof(state) == TYPE_DICTIONARY and state.get("players_data", []).size() == registry.slots.size():
-			state[Registry.SAVE_KEY] = registry.metadata()
 
 
 func _create_panel_box():
@@ -288,8 +343,8 @@ func _create_panel_box():
 	_panel.anchor_right = 0.5
 	_panel.anchor_top = 0.5
 	_panel.anchor_bottom = 0.5
-	_panel.margin_left = -300
-	_panel.margin_right = 300
+	_panel.margin_left = -450
+	_panel.margin_right = 450
 	_panel.margin_top = -180
 	_panel.margin_bottom = 180
 	canvas.add_child(_panel)
@@ -347,6 +402,15 @@ func _text(key: String) -> String:
 	return i18n.get_text(key) if i18n != null else tr(key)
 
 
+func _owner_label(owner: String, local_slot: int = 0) -> String:
+	if owner == _session().get_self_steam_id():
+		return _text("BROTATO_ONLINE_IDENTITY_LOCAL") + " " + str(local_slot + 1)
+	var label = _session().get_peer_display_name(owner)
+	if label != "":
+		return label
+	return "LAN " + owner.substr(4, 8) if owner.begins_with("lan:") else owner
+
+
 func _candidates() -> Array:
 	var result = []
 	var host = _session().get_self_steam_id()
@@ -356,9 +420,7 @@ func _candidates() -> Array:
 	for peer in _session()._connection_by_peer_key.keys():
 		if str(peer) == host:
 			continue
-		var label = _session().get_peer_display_name(str(peer))
-		if label == "":
-			label = str(peer) if not str(peer).begins_with("lan:") else "LAN " + str(peer).substr(4, 8)
+		var label = _owner_label(str(peer))
 		result.append({"owner_id": str(peer), "local_slot": 0, "label": label})
 	return result
 
@@ -388,11 +450,7 @@ func _update_panel() -> void:
 				choice.select(1)
 			if not _manual and choice.selected <= 0 and index < registry.slots.size():
 				var expected = registry.slots[index]
-				var name = _session().get_peer_display_name(str(expected.owner_id))
-				if name == "":
-					name = str(expected.owner_id).substr(0, 16)
-				if str(expected.owner_id) == _session().get_self_steam_id():
-					name = _text("BROTATO_ONLINE_IDENTITY_LOCAL") + " " + str(int(expected.local_slot) + 1)
+				var name = _owner_label(str(expected.owner_id), int(expected.local_slot))
 				choice.add_item(name + " — " + _text("BROTATO_ONLINE_IDENTITY_ABSENT"))
 				choice.select(choice.get_item_count() - 1)
 				choice.set_item_metadata(choice.selected, expected)
@@ -457,11 +515,11 @@ func _try_commit(manual: bool) -> void:
 			_resume_problem("BROTATO_ONLINE_IDENTITY_PROOF_MISSING")
 			return
 		if key != host and (local_slot != 0 or not _session()._connection_by_peer_key.has(key)):
-			_resume_problem("BROTATO_ONLINE_IDENTITY_NOT_CONNECTED", [_session().get_peer_display_name(key)])
+			_resume_problem("BROTATO_ONLINE_IDENTITY_NOT_CONNECTED", [_owner_label(key)])
 			return
 		if key != host and not _session()._seen_client_hello_by_steam_id.has(key):
 			# Steam lobby membership alone does not mean the mod client is ready.
-			_resume_problem("BROTATO_ONLINE_IDENTITY_HANDSHAKE", [_session().get_peer_display_name(key)])
+			_resume_problem("BROTATO_ONLINE_IDENTITY_HANDSHAKE", [_owner_label(key)])
 			return
 		layout.append({"peer_key": "" if key == host else key, "local_slot": local_slot})
 	# Host P0 is a vanilla invariant throughout this mod (camera, shops, menus).
@@ -479,7 +537,5 @@ func _try_commit(manual: bool) -> void:
 	_pending = false
 	_session()._lock_online_run_slots("resume_identity_commit")
 	_session().commit_resume_peer_order(layout)
-	ProgressData.saved_run_state[Registry.SAVE_KEY] = registry.metadata()
-	ProgressData.last_saved_run_state[Registry.SAVE_KEY] = registry.metadata()
-	ProgressData.save()
-	_resume_scene.identity_resume_committed()
+	persist_saved_identity()
+	_resume_bridge.identity_resume_committed()

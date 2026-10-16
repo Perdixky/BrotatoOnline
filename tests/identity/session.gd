@@ -2,7 +2,7 @@ extends Node
 const AUTO_CREATE_LOBBY_ON_OFFICIAL_COOP_CONTINUE = true
 const MAX_LOBBY_MEMBERS = 4
 const LAN_PROTOCOL_VERSION = 3
-const NETWORK_PROTOCOL_VERSION = "4.0.0"
+const NETWORK_PROTOCOL_VERSION = "5.0.0"
 const P2P_CHANNEL_MENU = 0
 var _self_steam_id = "1"
 var _online_role = "host"
@@ -24,6 +24,10 @@ var frozen = false
 var received_sender = ""
 var failures = []
 var welcomes = []
+var kicked = []
+func detach_kicked_peer(key):
+	kicked.append(key)
+	_seen_client_hello_by_steam_id.erase(key)
 func is_online_session_active():
 	return _session_active
 func is_game_host():

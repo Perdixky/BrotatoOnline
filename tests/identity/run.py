@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import os
 
 ROOT = Path(__file__).resolve().parents[2]
 TESTS = Path(__file__).resolve().parent
@@ -62,6 +63,7 @@ def main():
             "_can_create_lobby_from_current_scene", "create_session",
             "create_lobby_and_invite", "_handle_host_session_creation_failed",
             "_poll_join_request_timeout", "_on_lobby_created",
+            "_accept_client_protocol", "_is_lobby_protocol_compatible",
         ])
         session_functions = session_functions.replace(
             "func _handle_transport_welcome(", "func _apply_transport_welcome(")
@@ -75,13 +77,11 @@ def main():
         ])
         with (project / "slots.gd").open("a", encoding="utf-8") as out:
             out.write("\n" + slot_functions)
-        base = project / "ui/menus/shop"
-        base.mkdir(parents=True)
-        shutil.copyfile(TESTS / "resume_base.gd", base / "coop_resume.gd")
-        shutil.copyfile(ROOT / "extensions/coop_resume_player_identity.gd", project / "resume.gd")
+        (project / "extensions").mkdir()
+        shutil.copyfile(ROOT / "extensions/coop_resume_player_identity.gd", project / "extensions/coop_resume_player_identity.gd")
         singletons = project / "singletons"
         singletons.mkdir()
-        (singletons / "progress_data.gd").write_text('extends Node\nfunc get_run_state(_a=[],_b=[],_c=[],_d=[],_e=[],_f=[]) -> Dictionary:\n\treturn {"has_run_state": true, "players_data": RunData.players_data.duplicate()}\n', encoding="utf-8")
+        (singletons / "progress_data.gd").write_text('extends Node\nfunc save() -> void:\n\tpass\nfunc get_run_state(_a=[],_b=[],_c=[],_d=[],_e=[],_f=[]) -> Dictionary:\n\treturn {"has_run_state": true, "players_data": RunData.players_data.duplicate()}\n', encoding="utf-8")
         with (ROOT / "translations/brotato_online_zh.txt").open(encoding="utf-8-sig", newline="") as table:
             translations = dict(list(csv.reader(table))[1:])
         (project / "zh.json").write_text(json.dumps(translations, ensure_ascii=False), encoding="utf-8")
@@ -120,18 +120,26 @@ quality/driver/driver_name="GLES2"
         # Keep ConfigFile credentials in the temporary directory as well.
         manager = scripts / "player_identity_manager.gd"
         manager.write_text(manager.read_text(encoding="utf-8").replace(
-            '"user://brotato_online_identity.cfg"', '"res://test_identity.cfg"'), encoding="utf-8")
-        command = [str(engine), "--no-window", "--path", str(project)]
+            '"user://mod_data/six666-BrotatoOnline"', '"res://private-identity"').replace(
+            '"user://brotato_online_identity.cfg"', '"res://legacy_identity.cfg"'), encoding="utf-8")
+        log = project / "engine.log"
+        command = [str(engine), "--no-window", "--path", str(project), "--log-file", str(log)]
+        test_env = os.environ.copy()
+        test_env.update(APPDATA=str(project / "appdata"), XDG_DATA_HOME=str(project / "appdata"))
         if len(sys.argv) == 4 and sys.argv[2] == "--preview":
             command += ["--", "--preview", str(Path(sys.argv[3]).resolve())]
         try:
             result = subprocess.run(command,
-                                    capture_output=True, text=True, timeout=45)
+                                    capture_output=True, text=True, timeout=45, env=test_env)
         except subprocess.TimeoutExpired as error:
             for captured in [error.stdout, error.stderr]:
                 print(captured.decode(errors="replace") if isinstance(captured, bytes) else captured or "", end="")
+            if log.exists():
+                print(log.read_text(encoding="utf-8", errors="replace"))
             raise
         output = result.stdout + result.stderr
+        if log.exists():
+            output += log.read_text(encoding="utf-8", errors="replace")
         print(output, end="")
         marker = "IDENTITY TESTS PASSED" if len(sys.argv) == 2 else "IDENTITY UI PREVIEW SAVED"
         if result.returncode or marker not in output or "SCRIPT ERROR" in output or "ERROR:" in output:

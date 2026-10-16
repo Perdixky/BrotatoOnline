@@ -3,9 +3,8 @@ extends Node
 
 const BROTATO_APP_ID = 1942280
 const MAX_LOBBY_MEMBERS = 4
-# Keep the wire value compatible with the previous Steam protocol. The package
-# release version lives in manifest.json and may advance independently.
-const NETWORK_PROTOCOL_VERSION = "4.0.0"
+# Identity resume changes ownership semantics; mixed versions must not play.
+const NETWORK_PROTOCOL_VERSION = "5.0.0"
 const DEFAULT_LAN_PORT = 27462
 const LAN_DISCOVERY_PORT = 27463
 const LAN_PROTOCOL_VERSION = 3
@@ -1988,6 +1987,10 @@ func _on_lobby_created(connect_result = 0, lobby_id = 0) -> void:
 		call_deferred("open_invite_overlay")
 
 
+func _is_lobby_protocol_compatible(lobby_id) -> bool:
+	return _steam != null and str(_steam.getLobbyData(lobby_id, "mod_version")) == NETWORK_PROTOCOL_VERSION
+
+
 func _on_lobby_joined(lobby_id = 0, permissions = 0, locked = false, response = 0) -> void:
 	var response_code = int(response)
 	var join_succeeded = response_code == LOBBY_JOIN_SUCCESS_RESPONSE
@@ -1998,6 +2001,13 @@ func _on_lobby_joined(lobby_id = 0, permissions = 0, locked = false, response = 
 	if not join_succeeded or int(lobby_id) == 0:
 		_clear_pending_join_request()
 		_show_join_failure(_get_lobby_join_failure_text(response_code))
+		return
+	# Also guard friend invites/direct joins, which bypass the lobby browser.
+	if not _is_lobby_protocol_compatible(lobby_id):
+		if _steam != null:
+			_steam.leaveLobby(lobby_id)
+		_clear_pending_join_request()
+		_show_join_failure(_ui_text("join_failed_protocol_mismatch"))
 		return
 
 	var joined_from_client_request = _client_join_requested_lobby_id != 0 and str(_client_join_requested_lobby_id) == str(lobby_id)
@@ -3664,8 +3674,24 @@ func _update_client_members_from_selection_state(message: Dictionary) -> void:
 		_members = next_members
 
 
+func _accept_client_protocol(peer_key: String, message: Dictionary) -> bool:
+	if str(message.get("mod_version", "")) == NETWORK_PROTOCOL_VERSION:
+		return true
+	# This existing control message is understood by the previous release too.
+	# Flush its reliable notice before closing, and never acknowledge the hello.
+	detach_kicked_peer(peer_key)
+	_seen_client_hello_by_steam_id.erase(peer_key)
+	_sync_host_coop_slots_from_lobby()
+	return false
+
+
 func _handle_p2p_message(from_steam_id: String, message: Dictionary) -> void:
 	var msg_type = str(message.get("msg_type", ""))
+	if _is_game_host():
+		if msg_type == "hello" and not _accept_client_protocol(from_steam_id, message):
+			return
+		if not _seen_client_hello_by_steam_id.has(from_steam_id) and not msg_type in ["hello", "heartbeat", "p2p_json_chunk"]:
+			return
 	var identity = _get_identity_manager()
 	if _is_game_host() and identity != null and identity.is_resume_pending() and not msg_type in ["hello", "heartbeat", "p2p_json_chunk"]:
 		return

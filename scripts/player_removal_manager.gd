@@ -198,10 +198,6 @@ func filter_saved_state(state: Dictionary) -> Dictionary:
 		var value = state.get(key, null)
 		if typeof(value) == TYPE_ARRAY:
 			result[key] = _select_array(value, kept_positions, key != "players_data")
-	var identity_table = state.get("bo_player_identity", {})
-	if typeof(identity_table) == TYPE_DICTIONARY and typeof(identity_table.get("slots", null)) == TYPE_ARRAY and identity_table.slots.size() == players.size():
-		result["bo_player_identity"] = identity_table.duplicate(true)
-		result["bo_player_identity"]["slots"] = _select_array(identity_table.slots, kept_positions)
 	result["bo_roster_revision"] = revision
 	result["bo_roster_slots"] = kept_slots
 	return result
@@ -295,8 +291,6 @@ func _commit_host_removal(scene_id: int) -> void:
 	_reset_indexed_caches()
 	_trace("roster_compacted")
 	if not shop_save.empty():
-		if identity != null and not identity.registry.slots.empty():
-			shop_save["bo_player_identity"] = identity.registry.metadata()
 		shop_save["bo_roster_revision"] = revision
 		shop_save["bo_roster_slots"] = range(RunData.get_player_count())
 		ProgressData.saved_run_state = shop_save
@@ -338,8 +332,12 @@ func _finish_host_removal(path: String, kept: Array, shop_states: Array, lock_ru
 		_save_current_shop(next_scene)
 	# Rebuilding the official Continue page retains players who already rejoined.
 	if path.ends_with("/coop_resume.tscn"):
-		for _index in range(CoopService.connected_players.size()):
-			next_scene._on_connected_players_updated(CoopService.connected_players)
+		var identity = get_parent().get_node_or_null("BrotatoOnlinePlayerIdentityManager")
+		if identity != null:
+			identity.bind_resume_scene(next_scene)
+		if identity == null or not identity.guards_resume(next_scene):
+			for _index in range(CoopService.connected_players.size()):
+				next_scene._on_connected_players_updated(CoopService.connected_players)
 	var state = _menu().build_menu_scene_state(true, true, true)
 	state["scene_path"] = path
 	state["run_config"]["run_config_source"] = "player_removed"
